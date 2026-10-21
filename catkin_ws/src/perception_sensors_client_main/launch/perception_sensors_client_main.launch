@@ -13,8 +13,8 @@
 
     <!-- bag_recorder 参数，含义见 bag_recorder.launch -->
     <arg name="save_dir" default="" doc="bag 保存目录；留空表示仓库根目录的 log/rosbag"/>
-    <arg name="max_bag_size_gb" default="25.0" doc="单个 bag 分卷大小上限（GB）"/>
-    <arg name="max_splits" default="2" doc="最多保留的分卷数量"/>
+    <arg name="max_bag_size_gb" default="25.0" doc="单次录制总大小上限（GB）"/>
+    <arg name="total_limit_action" default="stop" doc="超过总上限时的动作：stop / delete_old"/>
 
     <!-- UWB 串口名在 uwb_rtu_serial_demo/launch/uwb_node.launch 内配置 -->
 
@@ -33,7 +33,7 @@
     <include file="$(find bag_recorder)/launch/bag_recorder.launch">
         <arg name="save_dir" value="$(arg save_dir)"/>
         <arg name="max_bag_size_gb" value="$(arg max_bag_size_gb)"/>
-        <arg name="max_splits" value="$(arg max_splits)"/>
+        <arg name="total_limit_action" value="$(arg total_limit_action)"/>
     </include>
 
     <!-- ================= 5. 保存按键联动 ================= -->

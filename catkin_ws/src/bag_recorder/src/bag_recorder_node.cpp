@@ -24,8 +24,10 @@
 // C++ 标准库
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -51,6 +53,14 @@ namespace {
 const char* const kBagPrefix = "perception_sensors_";
 const int kBagSeqWidth = 6;              // 6 位十进制，最大 999999
 const uint32_t kBagSeqMax = 999999;      // 序号耗尽后拒绝录制，避免回绕覆盖旧文件
+
+// 单个分卷大小固定 10 GB，不再通过 launch 配置。
+// rosbag 的 --size 单位是 MB，因此直接写 10 * 1024。
+const int kSplitSizeMb = 10 * 1024;
+
+// 总大小检查周期（秒）。rosbag 只支持单卷大小和分卷数量，没有“总大小上限”
+// 参数，所以由节点在录制期间定时统计当前批次的文件总大小。
+const double kTotalSizeCheckPeriodSec = 1.0;
 
 // 没有配置 record_topics 时使用的默认话题，与当前感知链路保持一致。
 // launch 中的 record_topics 优先级更高；这里只作为兜底，避免参数缺失时录不到数据。
@@ -131,8 +141,21 @@ private:
     // —— 现场可调参数（launch 全局命名空间）——
     std::vector<std::string> topics_;   // 录制话题列表；record_topics 覆盖默认值
     std::string save_dir_;              // 保存目录；空表示按 bag_recorder 包路径推导
-    double max_bag_size_gb_ = 25.0;     // 单个分卷大小上限（GB）
-    int max_splits_ = 2;                // 最多保留的分卷数量，超出删除最旧
+    double max_bag_size_gb_ = 25.0;     // 单次录制总大小上限（GB）
+    std::string total_limit_action_ = "stop";  // 达到总上限后的动作：stop / delete_old
+
+    // —— 当前录制批次 ——
+    std::string current_bag_prefix_;    // 当前批次的 bag 前缀（不含 _N.bag）
+    ros::Timer total_size_timer_;       // 录制期间定时检查总大小
+    bool limit_warning_shown_ = false;  // delete_old 无法删除时避免每秒刷日志
+
+    // 当前批次的一个分卷文件。
+    struct SplitFile {
+        fs::path path;
+        unsigned long index = 0;   // rosbag 追加的分卷号
+        bool active = false;       // true 表示 .bag.active，正在写入
+        uintmax_t size = 0;        // 字节数
+    };
 
     // —— 文件名序号状态 ——
     uint32_t next_bag_seq_ = 1;         // 下一次录制使用的序号
@@ -160,8 +183,15 @@ public:
         start_srv_ = nh_.advertiseService("perception_sensors/start_bag_recorder", &BagRecorderNode::startCallback, this);
         stop_srv_  = nh_.advertiseService("perception_sensors/stop_bag_recorder", &BagRecorderNode::stopCallback, this);
         // 录制状态广播：start/stop 时刻翻转，素材互斥由发布端消费
-        // （/robot_detector/recording_status，std_msgs/Bool）
-        record_status_pub_ = nh_.advertise<std_msgs::Bool>("robot_detector/recording_status", 5, true);  // latched: 后到订阅者立即拿到当前状态
+        // （/perception_sensors/recording_status，std_msgs/Bool）。
+        // 2026-10-21 由 /robot_detector/recording_status 迁入感知命名空间，
+        // 外部订阅端需同步修改话题名。
+        record_status_pub_ = nh_.advertise<std_msgs::Bool>("/perception_sensors/recording_status", 5, true);  // latched: 后到订阅者立即拿到当前状态
+
+        // 总大小检查定时器：rosbag 没有总大小上限参数，录制期间由节点统计
+        // 当前批次所有分卷（含正在写入的 .active）的总字节数。
+        total_size_timer_ = nh_.createTimer(
+            ros::Duration(kTotalSizeCheckPeriodSec), &BagRecorderNode::checkTotalSize, this);
         ROS_INFO("[BagRecorder] Standalone bag recorder node started (single-threaded version)...");
     }
 
@@ -214,8 +244,9 @@ public:
         const std::string first_bag_path = bag_prefix + "_0.bag";
         ROS_INFO_STREAM("[BagRecorder] Preparing to record to file: " << first_bag_path);
 
-        // 4. rosbag --size 的单位是 MB；launch 以 GB 暴露给现场。
-        const int max_size_mb = static_cast<int>(std::llround(max_bag_size_gb_ * 1024.0));
+        // 4. 单卷大小固定为 10 GB；总上限由定时器在录制期间检查，
+        //    不通过 rosbag 的分卷数量参数实现。
+        const int max_size_mb = kSplitSizeMb;
 
         // 5. 核心：使用 fork 创建子进程
         pid_t pid = fork();
@@ -237,13 +268,13 @@ public:
             argv_strings.push_back("record");
             argv_strings.push_back("--lz4");
 
-            // ================= 分卷大小与保留数量 =================
+            // ================= 分卷大小 =================
+            // 只按单卷大小切分；总上限与超限动作由父进程定时器处理。
+            // 不使用 --max-splits，避免 rosbag 的删除策略与节点开关冲突。
             argv_strings.push_back("--split");                       // 开启文件分割
-            argv_strings.push_back("--size");                        // 单个分卷上限（MB）
+            argv_strings.push_back("--size");                        // 单个分卷大小（MB）
             argv_strings.push_back(std::to_string(max_size_mb));
-            argv_strings.push_back("--max-splits");                  // 最多保留的分卷数
-            argv_strings.push_back(std::to_string(max_splits_));
-            // ======================================================
+            // ============================================
 
             // 使用 -O 指定精确路径：节点已经生成唯一文件名，不再让 rosbag
             // 追加自己的时间戳（-o 会追加，导致文件名出现两个时间戳）。
@@ -269,6 +300,8 @@ public:
         }
         else {
             // ================= 父进程执行区 =================
+            current_bag_prefix_ = bag_prefix;
+            limit_warning_shown_ = false;
             record_pid_.store(pid);
             is_recording_.store(true);
 
@@ -294,34 +327,9 @@ public:
             return true;
         }
 
-        pid_t pid = record_pid_.load();
-        ROS_INFO_STREAM("[BagRecorder] Stopping recording (Sending signal to PID: " << pid << ")...");
-
-        if (kill(pid, SIGINT) == 0) {
-            int status;
-            waitpid(pid, &status, 0);
-
-            is_recording_.store(false);
-            record_pid_.store(-1);
-
-            // 广播录制结束（素材保存恢复条件；rosbag 已落盘完成，无重叠帧）
-            std_msgs::Bool status_msg;
-            status_msg.data = false;
-            record_status_pub_.publish(status_msg);
-
-            res.success = true;
-            res.message = "Recording stopped gracefully.";
-            ROS_INFO("[BagRecorder] Recording stopped gracefully, bag file finalized.");
-        } else {
-            res.success = false;
-            res.message = "Failed to send signal to process.";
-            ROS_ERROR("[BagRecorder] Failed to send SIGINT, the process may have already exited.");
-            is_recording_.store(false);
-            // rosbag 已退出：广播录制结束，素材保存恢复
-            std_msgs::Bool status_msg;
-            status_msg.data = false;
-            record_status_pub_.publish(status_msg);
-        }
+        std::string message;
+        res.success = stopRecording(&message);
+        res.message = message;
         return true;
     }
 
@@ -366,7 +374,7 @@ private:
 
         nh_.param<std::string>("save_dir", save_dir_, "");
         nh_.param<double>("max_bag_size_gb", max_bag_size_gb_, 25.0);
-        nh_.param<int>("max_splits", max_splits_, 2);
+        nh_.param<std::string>("total_limit_action", total_limit_action_, "stop");
 
         // 参数兜底：非法值直接回退到默认值，避免把 rosbag 参数传成 0 或负数。
         if (max_bag_size_gb_ <= 0.0) {
@@ -374,20 +382,228 @@ private:
                      max_bag_size_gb_);
             max_bag_size_gb_ = 25.0;
         }
-        if (max_splits_ < 1) {
-            ROS_WARN("[BagRecorder] max_splits=%d 非法，回退到 2。", max_splits_);
-            max_splits_ = 2;
+        if (total_limit_action_ != "stop" && total_limit_action_ != "delete_old") {
+            ROS_WARN("[BagRecorder] total_limit_action='%s' 非法，回退到 stop。"
+                     "可选值：stop / delete_old。",
+                     total_limit_action_.c_str());
+            total_limit_action_ = "stop";
         }
 
         ROS_INFO("[BagRecorder] 录制话题（%zu 个）：", topics_.size());
         for (const auto& topic : topics_) {
             ROS_INFO("  - %s", topic.c_str());
         }
-        ROS_INFO("[BagRecorder] save_dir='%s'，分卷上限 %.3f GB（%d MB），最多保留 %d 个分卷。",
+        ROS_INFO("[BagRecorder] save_dir='%s'，单次总上限 %.3f GB，单卷 %.0f GB，超限动作 %s。",
                  save_dir_.empty() ? "<按 bag_recorder 包路径推导>" : save_dir_.c_str(),
                  max_bag_size_gb_,
-                 static_cast<int>(std::llround(max_bag_size_gb_ * 1024.0)),
-                 max_splits_);
+                 kSplitSizeMb / 1024.0,
+                 total_limit_action_.c_str());
+
+        // 单卷固定 10 GB。delete_old 只能删除已经关闭的旧分卷，如果总上限
+        // 比单卷还小，第一卷一写完就已经超限，此时没有旧卷可删。
+        if (total_limit_action_ == "delete_old" &&
+            max_bag_size_gb_ < kSplitSizeMb / 1024.0) {
+            ROS_WARN("[BagRecorder] 总上限 %.3f GB 小于单卷 %.0f GB，delete_old "
+                     "在首卷写入期间无法生效，建议把 max_bag_size_gb 调到至少单卷大小。",
+                     max_bag_size_gb_, kSplitSizeMb / 1024.0);
+        }
+    }
+
+    // 停止当前录制：给 rosbag 发 SIGINT 并等待其落盘，广播状态、清理当前批次。
+    // 返回 true 表示信号发送成功；失败时也会把内部状态置为未录制。
+    bool stopRecording(std::string* message) {
+        const pid_t pid = record_pid_.load();
+        if (!is_recording_.load() || pid <= 0) {
+            if (message) *message = "Not recording!";
+            return false;
+        }
+
+        ROS_INFO_STREAM("[BagRecorder] Stopping recording (Sending signal to PID: " << pid << ")...");
+        bool ok = true;
+        if (kill(pid, SIGINT) == 0) {
+            int status = 0;
+            waitpid(pid, &status, 0);
+        } else {
+            ok = false;
+            ROS_ERROR("[BagRecorder] Failed to send SIGINT, the process may have already exited.");
+        }
+
+        is_recording_.store(false);
+        record_pid_.store(-1);
+        current_bag_prefix_.clear();
+
+        // 广播录制结束（素材保存恢复条件；rosbag 已落盘完成，无重叠帧）
+        std_msgs::Bool status_msg;
+        status_msg.data = false;
+        record_status_pub_.publish(status_msg);
+
+        if (message) {
+            *message = ok ? "Recording stopped gracefully."
+                          : "Failed to send signal to process.";
+        }
+        if (ok) {
+            ROS_INFO("[BagRecorder] Recording stopped gracefully, bag file finalized.");
+        }
+        return ok;
+    }
+
+    // 列出当前批次的全部分卷文件（含正在写入的 .bag.active），按分卷号升序。
+    // 只匹配 current_bag_prefix_，避免误扫同目录下其它批次的 bag。
+    std::vector<SplitFile> currentSplits() const {
+        std::vector<SplitFile> splits;
+        if (current_bag_prefix_.empty()) {
+            return splits;
+        }
+
+        const fs::path prefix_path(current_bag_prefix_);
+        const std::string dir = prefix_path.parent_path().string();
+        const std::string base = prefix_path.filename().string() + "_";
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (ec) {
+                break;
+            }
+            std::error_code entry_ec;
+            if (!entry.is_regular_file(entry_ec) || entry_ec) {
+                continue;
+            }
+
+            const std::string name = entry.path().filename().string();
+            if (name.rfind(base, 0) != 0) {
+                continue;
+            }
+
+            std::string rest = name.substr(base.size());
+            const std::string active_ext = ".bag.active";
+            const std::string closed_ext = ".bag";
+            bool active = false;
+            if (rest.size() > active_ext.size() &&
+                rest.compare(rest.size() - active_ext.size(),
+                             active_ext.size(), active_ext) == 0) {
+                rest.resize(rest.size() - active_ext.size());
+                active = true;
+            } else if (rest.size() > closed_ext.size() &&
+                       rest.compare(rest.size() - closed_ext.size(),
+                                    closed_ext.size(), closed_ext) == 0) {
+                rest.resize(rest.size() - closed_ext.size());
+            } else {
+                continue;
+            }
+
+            // 分卷号必须是纯数字；rosbag 的格式是 <前缀>_<序号>.bag[.active]。
+            if (rest.empty() ||
+                !std::all_of(rest.begin(), rest.end(),
+                             [](unsigned char c) { return std::isdigit(c) != 0; })) {
+                continue;
+            }
+
+            unsigned long index = 0;
+            try {
+                index = std::stoul(rest);
+            } catch (const std::exception&) {
+                continue;
+            }
+
+            std::error_code size_ec;
+            const uintmax_t size = fs::file_size(entry.path(), size_ec);
+            if (size_ec) {
+                continue;
+            }
+
+            SplitFile split;
+            split.path = entry.path();
+            split.index = index;
+            split.active = active;
+            split.size = size;
+            splits.push_back(std::move(split));
+        }
+
+        std::sort(splits.begin(), splits.end(),
+                  [](const SplitFile& a, const SplitFile& b) {
+                      return a.index < b.index;
+                  });
+        return splits;
+    }
+
+    // 当前批次所有分卷（含正在写入的 .active）的总字节数。
+    uintmax_t currentRecordingBytes() const {
+        uintmax_t total = 0;
+        for (const auto& split : currentSplits()) {
+            total += split.size;
+        }
+        return total;
+    }
+
+    // 删除当前批次最旧的已关闭分卷，直到总大小不超过 cap_bytes。
+    // 正在写入的 .bag.active 永远不删，避免破坏 rosbag 的输出文件。
+    // 返回实际删除的分卷数量。
+    int deleteOldestClosedSplits(uintmax_t cap_bytes) {
+        const std::vector<SplitFile> splits = currentSplits();
+        uintmax_t total = 0;
+        for (const auto& split : splits) {
+            total += split.size;
+        }
+
+        int deleted = 0;
+        for (const auto& split : splits) {
+            if (total <= cap_bytes) {
+                break;
+            }
+            if (split.active) {
+                continue;
+            }
+
+            std::error_code ec;
+            if (!fs::remove(split.path, ec) || ec) {
+                ROS_WARN("[BagRecorder] 删除旧分卷失败：%s（%s）",
+                         split.path.c_str(), ec.message().c_str());
+                continue;
+            }
+
+            total -= split.size;
+            ++deleted;
+            ROS_INFO("[BagRecorder] 总大小超过上限，删除最旧分卷：%s（%.3f GB）",
+                     split.path.c_str(),
+                     static_cast<double>(split.size) / (1024.0 * 1024.0 * 1024.0));
+        }
+        return deleted;
+    }
+
+    // 定时检查当前批次总大小；达到 max_bag_size_gb_ 后按开关处理：
+    // stop 停止录制，delete_old 删除最旧的已关闭分卷后继续。
+    // 由 ros::spin() 单线程调用，与服务回调天然串行，不需要额外加锁。
+    void checkTotalSize(const ros::TimerEvent&) {
+        if (!is_recording_.load() || current_bag_prefix_.empty()) {
+            return;
+        }
+
+        const double bytes_per_gb = 1024.0 * 1024.0 * 1024.0;
+        const uintmax_t cap_bytes =
+            static_cast<uintmax_t>(max_bag_size_gb_ * bytes_per_gb);
+        const uintmax_t total = currentRecordingBytes();
+        if (total < cap_bytes) {
+            return;
+        }
+
+        const double total_gb = static_cast<double>(total) / bytes_per_gb;
+        if (total_limit_action_ == "delete_old") {
+            const int deleted = deleteOldestClosedSplits(cap_bytes);
+            if (deleted == 0 && !limit_warning_shown_) {
+                ROS_WARN("[BagRecorder] 总大小 %.3f GB 已达上限 %.3f GB，但没有可删除的"
+                         "已关闭分卷（当前卷仍在写入）。", total_gb, max_bag_size_gb_);
+                limit_warning_shown_ = true;
+            } else if (deleted > 0) {
+                limit_warning_shown_ = false;
+            }
+            return;
+        }
+
+        ROS_WARN("[BagRecorder] 总大小 %.3f GB 达到上限 %.3f GB，按 stop 策略停止录制。",
+                 total_gb, max_bag_size_gb_);
+        std::string message;
+        if (!stopRecording(&message)) {
+            ROS_ERROR("[BagRecorder] 达到总上限后停止失败：%s", message.c_str());
+        }
     }
 
     // 解析保存目录：save_dir 非空时直接用；为空时按 bag_recorder 自身包路径推导

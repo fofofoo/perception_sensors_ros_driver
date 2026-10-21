@@ -58,7 +58,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | `/perception_sensors/processed_lidar_connection_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；后启动的订阅者能立即拿到当前状态 |
 | `/perception_sensors/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 发布 | ≈3.3 Hz | 聚合消息，`radars[]` 为空表示本轮全部失败 |
 | `/perception_sensors/uwb_position` | `uwb_rtu_serial_demo/uwb_data` | 发布 | 跟标签上报走 | 没有定位帧就不发布；消息无 `header` |
-| `/robot_detector/recording_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched，录制中为 `true` |
+| `/perception_sensors/recording_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched，录制中为 `true` |
 | `/chassis_robot/chassis_status` | `std_msgs/Bool` | 订阅 | 由底盘决定 | `true`=开始保存，`false`=停止保存 |
 | `/perception_sensors/start_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 开始录制；重复调用返回 `Already recording!` |
 | `/perception_sensors/stop_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 停止录制；未录制时返回 `Not recording!` |
@@ -78,6 +78,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   标签未定位时不发布消息，不会发 0。
 - **录制**：文件名 `perception_sensors_<6位序号>_<YYYYmmdd_HHMMSS>_<分卷号>.bag`。
   序号在启动时扫描保存目录续号，时间戳只用于可读，时钟不准不会导致重名。
+  单卷固定 10 GB，超过后 rosbag 自动创建下一卷；总上限与超限动作见启动参数表。
 
 ## 频率链
 
@@ -113,7 +114,7 @@ source devel/setup.bash
 ```bash
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
-    gateway_ip:=192.168.1.15 save_dir:=/data/rosbag max_bag_size_gb:=25 max_splits:=2
+    gateway_ip:=192.168.1.15 save_dir:=/data/rosbag max_bag_size_gb:=25 total_limit_action:=delete_old
 ```
 
 顶层 launch 依次 include：`lidar_preprocess` → `ultrasonic_radar_modbus_tcp` → `uwb_rtu_serial_demo`
@@ -123,8 +124,8 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 | --- | --- | --- |
 | `gateway_ip` | `192.168.1.15` | 超声波 Modbus 网关地址 |
 | `save_dir` | 空 | 空表示仓库根目录的 `log/rosbag`，目录不存在时自动创建 |
-| `max_bag_size_gb` | `25.0` | 单个分卷上限（GB） |
-| `max_splits` | `2` | 最多保留的分卷数量，超出后 rosbag 删除最旧分卷 |
+| `max_bag_size_gb` | `25.0` | 单次录制总大小上限（GB）；单卷固定 10 GB，源码硬编码 |
+| `total_limit_action` | `stop` | 达到总上限时：`stop` 停止录制；`delete_old` 删除最旧分卷后继续 |
 
 UWB 串口名在 `uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置；雷达网络参数在
 `rslidar_sdk-v1.5.20/config/config.yaml` 中配置。
@@ -149,7 +150,7 @@ rostopic hz   /perception_sensors/processed_lidar_cloud
 rostopic echo -n1 /perception_sensors/processed_lidar_connection_status
 rostopic echo /perception_sensors/ultrasonic_radar_datas
 rostopic echo /perception_sensors/uwb_position
-rostopic echo -n1 /robot_detector/recording_status
+rostopic echo -n1 /perception_sensors/recording_status
 ```
 
 ## 已知陷阱
@@ -159,11 +160,14 @@ rostopic echo -n1 /robot_detector/recording_status
    `advertise/subscribe` 为准。
 2. **WSL2 默认 NAT 收不到雷达 UDP**：需要 mirrored 网络，或在 Windows 侧做端口转发；
    同时确认雷达网页里的点云目的地址是 `192.168.1.100`。
-3. **录制服务已改名**：现在只有 `/perception_sensors/start_bag_recorder` 和
-   `/perception_sensors/stop_bag_recorder`，旧的 `/robot_detector/*` 服务不再存在；
-   录制状态话题仍是 `/robot_detector/recording_status`。
-4. **`max_bag_size_gb=25` 是单个分卷上限，不是总占用上限**：`max_splits=2` 时总占用约 50 GB；
-   `--split` 下首个文件实际带 `_0` 后缀。
+3. **录制服务与状态话题已改名**：服务为 `/perception_sensors/start_bag_recorder`、
+   `/perception_sensors/stop_bag_recorder`，状态话题为 `/perception_sensors/recording_status`；
+   旧的 `/robot_detector/*` 名称不再存在，外部订阅端需同步修改。
+4. **单卷固定 10 GB，`max_bag_size_gb=25` 是单次录制总上限**：节点每秒统计当前批次
+   所有分卷（含正在写入的 `.bag.active`）。`total_limit_action=stop`（默认）时达到
+   25 GB 停止录制；`delete_old` 时删除最旧的已关闭分卷后继续，正在写入的卷不删。
+   删除以整卷为单位，因此 `delete_old` 下磁盘占用会在 15~25 GB 之间波动，而不是
+   精确停在 25 GB。`--split` 下首个文件实际带 `_0` 后缀。
 5. **保存目录默认在仓库根目录的 `log/rosbag`**：按 `bag_recorder` 包路径
    `../../../log/rosbag` 推导；现场长期运行建议用 `save_dir` 指到数据盘。
 6. **`/chassis_robot/chassis_status` 按 `std_msgs/Bool` 实现**：如果底盘实际发布的是自定义消息，

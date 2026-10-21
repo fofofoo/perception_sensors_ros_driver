@@ -38,7 +38,7 @@ source devel/setup.bash
 # 一键启动（参数按需覆盖）
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
-    gateway_ip:=192.168.1.15 save_dir:=/data/rosbag max_bag_size_gb:=25 max_splits:=2
+    gateway_ip:=192.168.1.15 save_dir:=/data/rosbag max_bag_size_gb:=25 total_limit_action:=delete_old
 ```
 
 `save_dir` 留空时使用仓库根目录的 `log/rosbag`。UWB 串口名在

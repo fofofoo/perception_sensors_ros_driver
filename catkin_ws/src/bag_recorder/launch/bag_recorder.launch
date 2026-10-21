@@ -5,19 +5,19 @@
       参数全部放在 <node> 外的全局命名空间，节点用主句柄 nh 读取；
       这样与工作区其它传感器节点的约定一致，也便于命令行覆盖：
         roslaunch bag_recorder bag_recorder.launch save_dir:=/data/rosbag
-        roslaunch bag_recorder bag_recorder.launch max_bag_size_gb:=10 max_splits:=5
+        roslaunch bag_recorder bag_recorder.launch max_bag_size_gb:=25 total_limit_action:=delete_old
     -->
 
     <!-- 保存目录；留空表示按 bag_recorder 包路径推导 <pkg>/../../../log/rosbag，即仓库根目录的 log/rosbag -->
     <arg name="save_dir" default="" doc="bag 保存目录，建议使用绝对路径"/>
-    <!-- 单个分卷大小上限，单位 GB；节点内部换算成 rosbag 的 size 参数（单位 MB） -->
-    <arg name="max_bag_size_gb" default="25.0" doc="单个 bag 分卷大小上限（GB）"/>
-    <!-- 最多保留的分卷数量；达到上限后 rosbag 会删除最旧的分卷 -->
-    <arg name="max_splits" default="2" doc="最多保留的分卷数量"/>
+    <!-- 单次录制总大小上限，单位 GB；单个分卷固定 10 GB，由源码硬编码 -->
+    <arg name="max_bag_size_gb" default="25.0" doc="单次录制总大小上限（GB）"/>
+    <!-- 达到总上限后的动作：stop=停止录制；delete_old=删除最旧分卷后继续录制 -->
+    <arg name="total_limit_action" default="stop" doc="超过总上限时的动作：stop / delete_old"/>
 
     <param name="save_dir" value="$(arg save_dir)"/>
     <param name="max_bag_size_gb" value="$(arg max_bag_size_gb)"/>
-    <param name="max_splits" value="$(arg max_splits)"/>
+    <param name="total_limit_action" value="$(arg total_limit_action)"/>
 
     <!--
       录制话题列表，与源码默认值保持一致。
