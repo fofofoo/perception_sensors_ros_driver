@@ -47,7 +47,12 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 - 激光雷达：驱动回调收包，预处理后台线程累加，主循环 10 Hz 取结果发布。
 - 超声波：主动轮询，每轮一条聚合消息，空数组表示本轮全部网关读取失败；
   启动时读不到数据的网关先跳过，由后台线程每 30 s 重探，接好模组后自动上线。
-- UWB：串口主动轮询，收一帧发一帧。
+  掉线重连细节与拔线测试步骤见
+  [ultrasonic_radar_modbus_tcp/README.md](catkin_ws/src/ultrasonic_radar_modbus_tcp/README.md#掉线重连方案)。
+- UWB：串口主动轮询，收一帧发一帧；启动时打不开串口不退出，每 5 s 重试；运行中读写异常或
+  30 s 无有效帧时按 10 s 节流自动重连，插回 USB-TTL 后无需重启节点。判定细节、三种重连落点
+  对比与拔串口测试步骤见
+  [uwb_rtu_serial_demo/README.md](catkin_ws/src/uwb_rtu_serial_demo/README.md#掉线重连方案)。
 - 录制：服务事件驱动；保存按键节点只负责把底盘状态翻译成 start/stop 服务调用。
 
 ## 话题与服务契约
@@ -178,5 +183,9 @@ rostopic echo /perception_sensors/recording_size
    `../../../log/rosbag` 推导；现场长期运行建议用 `save_dir` 指到数据盘。
 6. **`/chassis_robot/chassis_status` 按 `std_msgs/Bool` 实现**：如果底盘实际发布的是自定义消息，
    订阅端不会报错但收不到数据，需要同时修改 `perception_sensors_client_main` 的订阅类型。
-7. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
+7. **UWB 的重连阈值必须大于标签静态休眠间隔**：15 s 无帧只告警，30 s 才自动重连；
+   标签静态休眠默认 10 s 发一包，若现场把静态间隔调到 30 s 以上，需同步调大
+   `main.cpp` 的 `kLinkFailTimeoutMs`，否则会周期性做无意义的重连。断线期间不发布、
+   不补 0，下游需按超时判断数据失效。
+8. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
    可能不存在，读取协议和排障信息可以，按路径找代码不行。

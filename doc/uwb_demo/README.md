@@ -362,7 +362,7 @@ rostopic hz /uwb_position
 | --- | --- | --- |
 | 节点启动报「串口打开失败」 | 设备名不存在 | 启动时加 `uwb_serial_port:=/dev/ttyUSB0`，或配置 udev |
 | 报 `Permission denied` | 用户不在 `dialout` 组 | `sudo usermod -aG dialout $USER`，重新登录 |
-| 报 `Device or resource busy` | minicom、上位机或控制板已占用串口 | 关闭占用进程后重启节点 |
+| 报 `Device or resource busy` | minicom、上位机或控制板已占用串口 | 关闭占用进程；当前工作区节点会自动重连，无需重建进程 |
 | 收不到任何帧 | Tx/Rx 未交叉、未共地、模块不是 TTL 电平、基站未上电 | 按 2.1 节重接；用示波器/串口助手确认 |
 | 只看到 `03 0A 40 AD ...`，没有定位帧 | 标签不在 K 列表 | 用上位机或 40H（`4A 4E`）把标签 ID 加入 K 列表 |
 | 标签静止后长时间没数据 | 静态休眠，默认 10 s 才发一包 | 等待；或把标签静态频率调小；节点 15 s 才告警 |
@@ -383,7 +383,7 @@ rostopic hz /uwb_position
 | 位置 | 问题 | 影响 |
 | --- | --- | --- |
 | `uwb_node.cpp` | 不解析标签 ID（偏移 5~12） | 多标签场景无法区分来源 |
-| `main.cpp` | 运行中串口断开不自动重连 | 需重启节点 |
+| `main.cpp` | 本历史工程运行中串口断开不自动重连 | 需重启节点；当前仓库已改为 main 层自动重连（启动 5 s / 运行 10 s），见包 README |
 | `main.cpp` | 轮询频率、心跳阈值写死在源码 | 改这两个值需重新编译（串口与打印开关已进 launch） |
 | `uwb_data.msg` | 没有 `header` 字段 | 无精确时间戳和坐标系标识 |
 | `rtu_client.cpp` | 只接受 03H 应答帧 | 若将来下发 40H/50H，应答不会被取出 |

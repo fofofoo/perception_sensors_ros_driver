@@ -41,10 +41,26 @@ public:
     bool open(const std::string& port, uint32_t baudrate, int timeout_ms = 1000);
 
     /// 关闭串口并清空接收缓冲；重复调用安全。
+    /// 设备已拔出时 close 可能抛异常，内部捕获，保证退出路径不崩溃。
     void close();
 
     /// 串口是否已打开。
     bool isOpen() const;
+
+    /**
+     * @brief 重新打开串口。
+     *
+     * 用最近一次 open() 记录的 port / baudrate / timeout 重新打开：
+     * 先关闭旧句柄（设备已拔出时 close 可能抛异常，内部捕获），
+     * 清空接收缓冲与心跳窗口，再调用 open()。
+     * 主要供 main 在启动失败或运行中链路失联时按节流周期调用。
+     *
+     * @return true 重新打开成功；false 未记录设备路径或 open 失败（原因已打印）
+     */
+    bool reconnect();
+
+    /// 最近一次串口读写是否发生异常；open()/reconnect() 成功后清除。
+    bool linkError() const { return link_error_; }
 
     /**
      * @brief 尝试取出一整帧 Modbus-RTU 应答。
@@ -86,7 +102,7 @@ public:
      * （默认 10 s 才发一包），超时阈值应大于标签静态发包间隔，否则会误报。
      *
      * @param timeout_ms 超时时间，单位 ms
-     * @return true 链路存活；false 串口未打开或超时无数据
+     * @return true 链路存活；false 串口未打开、读写异常或超时无数据
      */
     bool isAlive(int timeout_ms) const;
 
@@ -99,6 +115,11 @@ private:
 
     serial::Serial sp_;                            ///< 底层串口对象
     std::vector<uint8_t> rx_buf_;                  ///< 接收累积缓冲（按字节流处理）
+
+    std::string port_;                             ///< 最近一次 open() 的设备路径，供 reconnect() 使用
+    uint32_t baudrate_ = 0;                        ///< 最近一次 open() 的波特率
+    int timeout_ms_ = 1000;                        ///< 最近一次 open() 的读超时，ms
+    bool link_error_ = false;                      ///< 读写异常标志；open()/reconnect() 成功后清除
 
     uint32_t frame_count_ = 0;                     ///< 当前 1 秒窗口内的成功收帧数
     std::chrono::steady_clock::time_point window_start_ = std::chrono::steady_clock::now();

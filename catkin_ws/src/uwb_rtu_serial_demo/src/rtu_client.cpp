@@ -26,9 +26,14 @@ namespace uwb_rtu_serial_demo
 // ==================== 串口管理 ====================
 
 // 按手册 4.1 配置 8N1 并打开串口。打开过程中的异常全部在内部捕获。
+// 入口先保存 port/baudrate/timeout，即使本次打开失败，reconnect() 仍知道该重开哪个设备。
 // @return true 打开成功，接收缓冲与心跳窗口已重置；false 打开失败（已打印原因）
 bool RtuClient::open(const std::string& port, uint32_t baudrate, int timeout_ms)
 {
+    port_      = port;
+    baudrate_  = baudrate;
+    timeout_ms_ = timeout_ms;
+
     try
     {
         sp_.setPort(port);
@@ -39,34 +44,61 @@ bool RtuClient::open(const std::string& port, uint32_t baudrate, int timeout_ms)
         serial::Timeout timeout = serial::Timeout::simpleTimeout(timeout_ms);
         sp_.setTimeout(timeout);                  // 该接口要求非 const 引用
         sp_.open();
+        sp_.flushInput();     // 放进 try：设备刚拔出时 flush 也可能抛异常
     }
     catch (const std::exception& e)
     {
+        link_error_ = true;
+
+        // open() 可能已成功、flushInput() 才失败，这里补一次关闭，避免句柄泄漏
+        try
+        {
+            if (sp_.isOpen())
+            {
+                sp_.close();
+            }
+        }
+        catch (const std::exception& close_error)
+        {
+            std::cerr << "打开失败后关闭串口异常：" << close_error.what() << std::endl;
+        }
+
+        rx_buf_.clear();
+        frame_count_ = 0;
+        window_start_ = last_frame_time_ = std::chrono::steady_clock::now();
         std::cerr << "打开串口 " << port << " 失败：" << e.what() << std::endl;
         return false;
     }
 
-    sp_.flushInput();     // 丢掉上次运行残留的字节，避免首帧从半截开始
     rx_buf_.clear();
 
     // 心跳统计从头开始，避免把上次运行的帧数算进第一个窗口
     frame_count_ = 0;
-    window_start_ = std::chrono::steady_clock::now();
-    last_frame_time_ = window_start_;
+    window_start_ = last_frame_time_ = std::chrono::steady_clock::now();
+    link_error_ = false;
     return true;
 }
 
 // 关闭串口并清空接收缓冲、心跳计数。未打开时调用也安全（只做状态复位）。
+// USB-TTL 拔出后 close 可能抛异常；这里捕获，保证 SIGINT 退出路径不崩溃。
 void RtuClient::close()
 {
-    if (sp_.isOpen())
+    try
     {
-        sp_.close();
+        if (sp_.isOpen())
+        {
+            sp_.close();
+        }
     }
+    catch (const std::exception& e)
+    {
+        std::cerr << "关闭串口异常：" << e.what() << std::endl;
+    }
+
     rx_buf_.clear();
     frame_count_ = 0;
-    window_start_ = std::chrono::steady_clock::now();
-    last_frame_time_ = window_start_;
+    window_start_ = last_frame_time_ = std::chrono::steady_clock::now();
+    link_error_ = false;
 }
 
 // 串口状态查询，不改变任何内部状态。
@@ -75,27 +107,80 @@ bool RtuClient::isOpen() const
     return sp_.isOpen();
 }
 
+// 用最近一次 open() 记录的参数重新打开串口。
+// 先关闭旧句柄并清空缓冲/心跳窗口，避免把断线前的半帧或旧计数带进新连接。
+// @return true 重开成功；false 未记录路径或 open 失败（原因由 open() 打印）
+bool RtuClient::reconnect()
+{
+    try
+    {
+        if (sp_.isOpen())
+        {
+            sp_.close();
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "重连前关闭串口异常：" << e.what() << std::endl;
+    }
+
+    rx_buf_.clear();
+    frame_count_ = 0;
+    window_start_ = last_frame_time_ = std::chrono::steady_clock::now();
+    link_error_ = false;
+
+    if (port_.empty())
+    {
+        std::cerr << "串口重连失败：未记录设备路径" << std::endl;
+        return false;
+    }
+
+    std::cerr << "尝试重连串口 " << port_ << " ..." << std::endl;
+    if (!open(port_, baudrate_, timeout_ms_))
+    {
+        return false;   // open() 已打印具体原因，并置 link_error_ = true
+    }
+
+    std::cerr << "串口 " << port_ << " 重连成功（" << baudrate_ << " 8N1）" << std::endl;
+    return true;
+}
+
 // ==================== 收帧 ====================
 
 // 把串口当前可读字节追加到 rx_buf_。非阻塞：没数据直接返回。
 // 实际读到的长度以 read() 返回值为准（available() 只是上限，可能少于它）。
+// USB-TTL 拔出后 available()/read() 会抛异常；捕获后置 link_error_，
+// 由 main 的链路探针统一触发 reconnect，这里不再继续解析旧缓冲。
 void RtuClient::drainSerial()
 {
-    const size_t n = sp_.available();
-    if (n == 0)
+    if (link_error_)
     {
         return;
     }
 
-    const size_t old_size = rx_buf_.size();
-    rx_buf_.resize(old_size + n);
-    const size_t got = sp_.read(rx_buf_.data() + old_size, n);
-    rx_buf_.resize(old_size + got);
-
-    // 长时间收到无效数据时只保留最近一段，避免内存无限增长
-    if (rx_buf_.size() > kMaxBuffer)
+    try
     {
-        discard(rx_buf_.size() - kMaxBuffer);
+        const size_t n = sp_.available();
+        if (n == 0)
+        {
+            return;
+        }
+
+        const size_t old_size = rx_buf_.size();
+        rx_buf_.resize(old_size + n);
+        const size_t got = sp_.read(rx_buf_.data() + old_size, n);
+        rx_buf_.resize(old_size + got);
+
+        // 长时间收到无效数据时只保留最近一段，避免内存无限增长
+        if (rx_buf_.size() > kMaxBuffer)
+        {
+            discard(rx_buf_.size() - kMaxBuffer);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        link_error_ = true;
+        std::cerr << "串口读取异常：" << e.what() << "，等待重连" << std::endl;
     }
 }
 
@@ -118,12 +203,16 @@ void RtuClient::discard(size_t n)
 bool RtuClient::readFrame(std::vector<uint8_t>& frame)
 {
     frame.clear();
-    if (!sp_.isOpen())
+    if (link_error_ || !sp_.isOpen())
     {
         return false;
     }
 
     drainSerial();
+    if (link_error_)
+    {
+        return false;   // 本次 read 已异常：不再解析断线前残留的半帧
+    }
 
     // 注意：基站主动上报都用 03H（手册 4.2），既包括定位帧（LEN=0x12），
     // 也包括新标签上报帧（LEN=0x0A）。本层只保证「整帧 + CRC 正确」，
@@ -201,7 +290,8 @@ bool RtuClient::write(const std::vector<uint8_t>& data)
     }
     catch (const std::exception& e)
     {
-        std::cerr << "串口写失败：" << e.what() << std::endl;
+        link_error_ = true;
+        std::cerr << "串口写失败：" << e.what() << "，等待重连" << std::endl;
         return false;
     }
 }
@@ -229,11 +319,11 @@ bool RtuClient::updateHeartbeat(uint32_t& hz)
 }
 
 // 链路存活判断：最近 timeout_ms 内是否收到过 CRC 正确的整帧。
-// @return true 存活；false 串口未打开或超时无帧
+// @return true 存活；false 串口未打开、读写异常或超时无帧
 // 注意阈值要大于标签静态休眠间隔，否则静止时会被误判为掉线。
 bool RtuClient::isAlive(int timeout_ms) const
 {
-    if (!sp_.isOpen())
+    if (link_error_ || !sp_.isOpen())
     {
         return false;
     }
