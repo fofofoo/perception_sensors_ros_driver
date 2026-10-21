@@ -189,3 +189,14 @@ rostopic echo /perception_sensors/recording_size
    不补 0，下游需按超时判断数据失效。
 8. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
    可能不存在，读取协议和排障信息可以，按路径找代码不行。
+9. **终端里裸的 `ERRCODE_MSOPTIMEOUT` 来自激光雷达驱动，不是 ROS 日志**：现象是日志中间突然
+   冒出一行没有 `[WARN] [时间戳]` 前缀、没有节点名的 `ERRCODE_MSOPTIMEOUT`，还常夹在超声波
+   或 UWB 的输出之间，容易被误认为是它们的报错。原因是 `rs_driver` 的日志宏
+   （[rs_log.hpp](catkin_ws/src/rslidar_sdk-v1.5.20/src/rs_driver/src/rs_driver/common/rs_log.hpp)）
+   直接 `std::cout` 写标准输出，绕过 ROS 日志系统；多个节点的 `std::cout` 与 `rosout`
+   各自刷新，行序会互相穿插。该错误码由
+   [input_sock_epoll.hpp](catkin_ws/src/rslidar_sdk-v1.5.20/src/rs_driver/src/rs_driver/driver/input/unix/input_sock_epoll.hpp)
+   在 `epoll_wait` 等待 MSOP 包超时 1 s 时发出，经
+   [source_driver.hpp](catkin_ws/src/rslidar_sdk-v1.5.20/src/source/source_driver.hpp)
+   以 WARNING 级别打印，**每超时 1 s 报一次且不限流**。零星出现（网络抖动、丢包）可忽略，
+   节点不会退出；连续每秒刷说明雷达没在发包或主机收不到，按陷阱 2 检查网络与点云目的地址。
