@@ -1,0 +1,47 @@
+<launch>
+  <!--
+    超声波雷达 Modbus TCP 节点
+
+    适用链路：
+      上位机 → 网口 → 艾莫迅 RS485-ETH-M04（Modbus 网关模式）
+      → RS485 → DYP 模组
+
+    默认网关：192.168.1.15
+    默认端口：503（HC1）、502（HC0）
+    启动时会逐个探测，读不到数据的端口自动跳过。
+  -->
+
+  <!-- 串口服务器 IP -->
+  <arg name="gateway_ip" default="192.168.1.15" />
+
+  <!-- 默认检测的两个 Modbus 网关端口；M04 通用模式下 502~505 对应 HC0~HC3 -->
+  <arg name="port_1" default="503" />
+  <arg name="port_2" default="502" />
+
+  <!--
+    参数全部设在全局命名空间（放在 <node> 外），main 用主句柄 nh 读取。
+    这样节点内部不需要私有句柄；launch 内不要再用 ~gateway_ip 这类私有名。
+  -->
+
+  <!-- 固定两个网关端口，每个端口对应一组 4 路探头，共用同一台串口服务器 -->
+  <param name="gateway_ip" value="$(arg gateway_ip)" />
+  <param name="port_1" value="$(arg port_1)" />
+  <param name="port_2" value="$(arg port_2)" />
+
+  <!-- 轮询周期（秒）。实测 0.25 会让 M04 周期性返回 00 80 FF，0.3 稳定 -->
+  <param name="poll_interval" value="0.3" />
+  <!-- 连接和单次应答超时（秒） -->
+  <param name="timeout" value="0.5" />
+  <!-- 已探测到的服务器断线后的重连间隔（秒） -->
+  <param name="reconnect_interval" value="1.0" />
+
+  <!-- 每个轮询周期打印 4 路原始 mm 值和换算后的距离 -->
+  <param name="print_data" value="true" />
+
+  <!-- 现场排障时改为 true，会打印 Modbus TCP 收发字节 -->
+  <param name="debug_frames" value="false" />
+
+  <node pkg="ultrasonic_radar_modbus_tcp" type="radar_node"
+        name="ultrasonic_radar_modbus_tcp" output="screen">
+  </node>
+</launch>

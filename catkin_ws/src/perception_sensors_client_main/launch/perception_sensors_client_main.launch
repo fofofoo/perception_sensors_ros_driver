@@ -1,0 +1,44 @@
+<launch>
+    <!--
+      感知传感器一键启动。
+
+      依次拉起：激光雷达驱动 + 预处理、超声波雷达、UWB、bag_recorder，
+      最后启动保存按键联动节点。按键节点只订阅
+      /chassis_robot/chassis_status（std_msgs/Bool），并调用
+      /perception_sensors/start_bag_recorder、/perception_sensors/stop_bag_recorder。
+    -->
+
+    <!-- 超声波网关地址（现场网络可能不同） -->
+    <arg name="gateway_ip" default="192.168.1.15" doc="超声波 Modbus 网关 IP"/>
+
+    <!-- bag_recorder 参数，含义见 bag_recorder.launch -->
+    <arg name="save_dir" default="" doc="bag 保存目录；留空表示仓库根目录的 log/rosbag"/>
+    <arg name="max_bag_size_gb" default="25.0" doc="单个 bag 分卷大小上限（GB）"/>
+    <arg name="max_splits" default="2" doc="最多保留的分卷数量"/>
+
+    <!-- UWB 串口名在 uwb_rtu_serial_demo/launch/uwb_node.launch 内配置 -->
+
+    <!-- ================= 1. 激光雷达 ================= -->
+    <include file="$(find lidar_preprocess)/launch/lidar_preprocess.launch"/>
+
+    <!-- ================= 2. 超声波雷达 ================= -->
+    <include file="$(find ultrasonic_radar_modbus_tcp)/launch/ultrasonic_radar_modbus_tcp.launch">
+        <arg name="gateway_ip" value="$(arg gateway_ip)"/>
+    </include>
+
+    <!-- ================= 3. UWB 基站 ================= -->
+    <include file="$(find uwb_rtu_serial_demo)/launch/uwb_node.launch"/>
+
+    <!-- ================= 4. rosbag 录制控制 ================= -->
+    <include file="$(find bag_recorder)/launch/bag_recorder.launch">
+        <arg name="save_dir" value="$(arg save_dir)"/>
+        <arg name="max_bag_size_gb" value="$(arg max_bag_size_gb)"/>
+        <arg name="max_splits" value="$(arg max_splits)"/>
+    </include>
+
+    <!-- ================= 5. 保存按键联动 ================= -->
+    <node name="perception_sensors_client_main"
+          pkg="perception_sensors_client_main"
+          type="perception_sensors_client_main_node"
+          output="screen"/>
+</launch>

@@ -1,0 +1,25 @@
+<launch>
+    <!-- ================= 全局参数配置 (Arguments) ================= -->
+    <!-- 点云话题：rslidar_sdk 固定发布 /rslidar_points（x86 与 ARM 相同），
+         仍保留为 arg，便于启动时通过命令行覆盖 -->
+    <arg name="lidar_topic" default="/rslidar_points" doc="输入点云话题"/>
+    
+    <!-- 预处理节点核心参数 -->
+    <arg name="frame_quantity" default="10" doc="点云滑动窗口累加帧数"/>
+    <arg name="timeout_sec" default="5.0" doc="雷达心跳超时时间(秒)"/>
+
+    <!-- ================= 1. 启动速腾 Airy360 底层驱动 ================= -->
+    <!-- rslidar_sdk 的 start.launch 只启动驱动节点，不再自动拉起 rviz -->
+    <include file="$(find rslidar_sdk)/launch/start.launch"/>
+   
+    <!-- ================= 2. 启动点云预处理节点 ================= -->
+    <!-- pkg: 功能包名, type: CMakeLists.txt 中 add_executable 定义的可执行文件名 -->
+    <node name="lidar_preprocess_node" pkg="lidar_preprocess" type="lidar_preprocess_node" output="screen">
+        
+        <!-- 将 launch 参数注入到 ROS 参数服务器，供节点内部读取 -->
+        <param name="input_topic" value="$(arg lidar_topic)"/>
+        <param name="frame_quantity" value="$(arg frame_quantity)"/>
+        
+    </node>
+
+</launch>

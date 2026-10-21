@@ -1,0 +1,37 @@
+# 编译产物
+catkin_ws/build/
+catkin_ws/devel/
+catkin_ws/install/
+build/
+devel/
+install/
+*.o
+*.so
+*.so.*
+*.a
+*.out
+CMakeCache.txt
+CMakeFiles/
+
+# 录制数据与日志
+*.bag
+*.bag.active
+log/rosbag/
+*.log
+
+# 模型 / 权重文件
+*.engine
+*.trt
+
+# IDE 与本地配置
+.vscode/
+.idea/
+.claude/
+CLAUDE.md
+
+# Windows 标记文件
+*Zone.Identifier
+
+# Python 缓存
+__pycache__/
+*.pyc

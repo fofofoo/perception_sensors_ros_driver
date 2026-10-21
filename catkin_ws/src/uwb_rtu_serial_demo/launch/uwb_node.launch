@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+  <!--
+    UWB 定位节点启动文件。
+
+    现场可调参数放在 <node> 外的全局命名空间，main.cpp 用 nh.param 读取。
+    命令行覆盖示例：
+      roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_serial_port:=/dev/ttyUSB0
+      roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_print_frame:=false
+  -->
+
+  <!-- 基站 TTL 转串口设备；没有 udev 固定名时改成 /dev/ttyUSB0 等 -->
+  <param name="uwb_serial_port" value="/dev/ttyUWB"/>
+
+  <!-- 是否逐帧打印定位结果；正式运行可设为 false -->
+  <param name="uwb_print_frame" value="true"/>
+
+  <node pkg="uwb_rtu_serial_demo" type="uwb_node" name="uwb_node" output="screen"/>
+</launch>

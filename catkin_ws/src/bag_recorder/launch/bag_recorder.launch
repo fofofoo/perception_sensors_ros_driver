@@ -1,0 +1,34 @@
+<launch>
+    <!--
+      录制控制节点参数。
+
+      参数全部放在 <node> 外的全局命名空间，节点用主句柄 nh 读取；
+      这样与工作区其它传感器节点的约定一致，也便于命令行覆盖：
+        roslaunch bag_recorder bag_recorder.launch save_dir:=/data/rosbag
+        roslaunch bag_recorder bag_recorder.launch max_bag_size_gb:=10 max_splits:=5
+    -->
+
+    <!-- 保存目录；留空表示按 bag_recorder 包路径推导 <pkg>/../../../log/rosbag，即仓库根目录的 log/rosbag -->
+    <arg name="save_dir" default="" doc="bag 保存目录，建议使用绝对路径"/>
+    <!-- 单个分卷大小上限，单位 GB；节点内部换算成 rosbag 的 size 参数（单位 MB） -->
+    <arg name="max_bag_size_gb" default="25.0" doc="单个 bag 分卷大小上限（GB）"/>
+    <!-- 最多保留的分卷数量；达到上限后 rosbag 会删除最旧的分卷 -->
+    <arg name="max_splits" default="2" doc="最多保留的分卷数量"/>
+
+    <param name="save_dir" value="$(arg save_dir)"/>
+    <param name="max_bag_size_gb" value="$(arg max_bag_size_gb)"/>
+    <param name="max_splits" value="$(arg max_splits)"/>
+
+    <!--
+      录制话题列表，与源码默认值保持一致。
+      使用 <rosparam> 而不是 <param value="[...]">，确保参数服务器里是字符串数组；
+      节点同时兼容数组和 "[/a, /b]" 字符串两种写法。
+    -->
+    <rosparam param="record_topics">
+      - /perception_sensors/processed_lidar_cloud
+      - /perception_sensors/ultrasonic_radar_datas
+      - /perception_sensors/uwb_position
+    </rosparam>
+
+    <node name="bag_recorder_node" pkg="bag_recorder" type="bag_recorder_node" output="screen"/>
+</launch>

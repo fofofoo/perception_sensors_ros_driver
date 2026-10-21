@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>ultrasonic_radar_modbus_tcp</name>
+  <version>0.1.0</version>
+  <description>多路 DYP 超声波雷达的 Modbus TCP 接入节点</description>
+  <maintainer email="zhangdie@todo.todo">zhangdie</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+</package>
