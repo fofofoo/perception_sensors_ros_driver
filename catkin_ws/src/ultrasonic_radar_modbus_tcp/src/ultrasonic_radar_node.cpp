@@ -312,6 +312,10 @@ ultrasonic_radar_datas UltrasonicRadarNode::queryRadars() {
   batch.radars.reserve(servers_.size());
 
   for (ServerRuntime& server : servers_) {
+    // 先按本轮失败处理：只有走完「已上线 + 连接可用 + 读寄存器成功」
+    // 三个条件才置 online=true，避免任何一条提前 return 留下上一轮的旧状态。
+    server.online = false;
+
     // 离线服务器由后台线程重探，主循环不在这里等待连接。
     // 只做一次短临界区读取，避免和后台线程的 available 更新竞争。
     bool available = false;
@@ -335,9 +339,28 @@ ultrasonic_radar_datas UltrasonicRadarNode::queryRadars() {
     if (config_.print_data) printRadarData(data, registers);
 
     batch.radars.push_back(data);
+
+    // 三轮条件都通过才算在线；读到全 0 mm 也算在线（无目标不是通讯故障）。
+    server.online = true;
   }
 
   return batch;
+}
+
+// 返回所有服务器的在线状态快照，供 main 发布状态话题。
+// online 由 queryRadars() 每轮刷新，只由主线程读写，所以这里不加锁。
+// 顺序与构造时传入的 servers 一致，main 建发布器时按同一顺序对应。
+std::vector<UltrasonicRadarNode::ServerStatus>
+UltrasonicRadarNode::serverStatuses() const {
+  std::vector<ServerStatus> statuses;
+  statuses.reserve(servers_.size());
+  for (const ServerRuntime& server : servers_) {
+    ServerStatus status;
+    status.name = server.config.name;
+    status.online = server.online;
+    statuses.push_back(status);
+  }
+  return statuses;
 }
 
 // 保证连接可用：已连接直接返回，断线时尝试重新建立 TCP 连接。

@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include <ros/ros.h>
+#include <std_msgs/Bool.h>
 
 #include "uwb_rtu_serial_demo/rtu_client.h"
 #include "uwb_rtu_serial_demo/uwb_data.h"
@@ -17,6 +18,10 @@
  * 数据流：
  *   基站主动推送 03H 应答帧 → RtuClient 成帧 + CRC 校验 → UwbNode 过滤 CA DA 定位帧并换算单位
  *    → main 发布 /perception_sensors/uwb_position（uwb_rtu_serial_demo/uwb_data）。
+ *
+ * 话题：
+ *   /perception_sensors/uwb_position —— 定位数据，收一帧发一帧
+ *   /perception_sensors/uwb_status   —— 链路状态 std_msgs/Bool，跳变时发布（latched）
  *
  * 本节点是「主动轮询型」：串口只读不写。基站定位成功后自动输出坐标，
  * PC 无需发送任何指令开启数据输出（手册 4.4（1））。
@@ -84,9 +89,18 @@ int main(int argc, char* argv[])
     // 发布节奏跟帧走（收一帧发一帧），默认约 10 Hz；队列 10 约等于 1 秒缓存。
     ros::Publisher pub = nh.advertise<uwb_rtu_serial_demo::uwb_data>("/perception_sensors/uwb_position", 10);
 
+    // 链路状态话题：true=在线，false=串口未打开 / 读写异常 / 超时无有效帧。
+    // latched=true：后启动的订阅者能立即拿到最近一次状态，不必等下一次跳变。
+    ros::Publisher status_pub =
+        nh.advertise<std_msgs::Bool>("/perception_sensors/uwb_status", 10, true);
+
     // —— 三、心跳与重连状态 ——
     uint32_t frequency = 0;      // 最近一个 1 秒窗口内的收帧数，写入消息 fre 字段
     bool stale_warned = false;   // 链路超时告警只打一次，恢复后复位
+
+    // 状态话题的发布控制：首轮必发一次，之后只在 true/false 跳变时发布。
+    bool last_online = false;      // 上一轮已发布的链路状态
+    bool status_published = false; // 是否已发过首条
 
     // link_ever_ok 区分两种失败：启动就没打开（5 s 重试）和运行中掉线（10 s 重连）。
     // 初始值取 open() 的结果；reconnect 成功后置 true。
@@ -172,6 +186,33 @@ int main(int argc, char* argv[])
                     frequency = 0;   // 新窗口尚未结算，避免把断线前的收帧数带进重连后的首帧
                 }
             }
+        }
+
+        // —— 六、发布链路状态 ——
+        // isAlive() 已包含「串口未打开 / 读写异常 / 超时无有效帧」三种情况。
+        // 阈值取 15 s 告警阈值 kHeartbeatTimeoutMs，而不是 30 s 的重连阈值：
+        // 下游要比重连早一步知道数据已失效。串口刚打开时 last_frame_time 被重置，
+        // 有 15 s 宽限，不会因为还没有帧就立刻报 false。
+        // 只在 true/false 跳变时发布一条，latched 保留当前值。
+        const bool online = client.isAlive(kHeartbeatTimeoutMs);
+        if (!status_published || online != last_online)
+        {
+            std_msgs::Bool status_msg;
+            status_msg.data = online;
+            status_pub.publish(status_msg);
+
+            if (online)
+            {
+                ROS_INFO("UWB 链路在线");
+            }
+            else
+            {
+                ROS_WARN("UWB 链路超时/断开：串口未打开、读写异常或超过 %d ms 无有效帧",
+                         kHeartbeatTimeoutMs);
+            }
+
+            last_online = online;
+            status_published = true;
         }
 
         // 当前节点没有订阅者，spinOnce 保留用于处理 ROS 内部回调与退出流程

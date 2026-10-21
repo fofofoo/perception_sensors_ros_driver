@@ -70,7 +70,21 @@ class UltrasonicRadarNode {
   // 问询并读取所有可用服务器，返回本轮可发布的数据。
   // 已上线服务器断线时在内部按 reconnect_interval 重连；未上线的服务器
   // 直接跳过，由后台线程重探，不阻塞本轮其他服务器。
+  // 同时刷新每台服务器的 online 状态（本轮读成功即 true）。
   ultrasonic_radar_datas queryRadars();
+
+  // 单台服务器的在线状态快照，供 main 发布状态话题。
+  // online 的含义是「最近一轮 queryRadars() 是否读到了有效寄存器」，
+  // 因此启动探测失败、后台重探中、读超时、网关忙/异常帧都会是 false。
+  struct ServerStatus {
+    std::string name;  // 与数据消息里的 name 一致，如 left_radar_502
+    bool online = false;
+  };
+
+  // 返回所有服务器的状态，顺序与构造时传入的 servers 一致。
+  // 必须在 queryRadars() 之后、同一线程调用；online 只由主线程写，
+  // 后台重探线程不修改它，因此这里不需要加 state_mutex_。
+  std::vector<ServerStatus> serverStatuses() const;
 
  private:
   // 一台服务器的运行时状态：静态配置 + 连接对象 + 重连节流 + 探测结果。
@@ -85,6 +99,12 @@ class UltrasonicRadarNode {
     // 下一次允许重新探测的时间。仅对 available=false 的服务器有意义，
     // 由后台线程在失败后顺延 reprobe_interval；由 state_mutex_ 保护。
     ros::Time next_probe_attempt;
+    // 最近一轮 queryRadars() 是否读到了有效寄存器，发布状态话题用。
+    // 与 available 的区别：available 表示「是否加入轮询」（重探成功后由后台
+    // 线程置 true）；online 表示「本轮是否真的读到数据」（主线程每轮刷新）。
+    // 只由主线程写（queryRadars 置位、serverStatuses 读取），后台线程不碰，
+    // 因此不受 state_mutex_ 保护。
+    bool online = false;
   };
 
   // 启动探测：最多尝试 attempts 次（默认 2），能读到寄存器才算成功。

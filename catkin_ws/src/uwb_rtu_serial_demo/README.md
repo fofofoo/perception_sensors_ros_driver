@@ -10,6 +10,14 @@ D-PDOA-Node-B 基站经 **TTL UART（USB-TTL，默认 `/dev/ttyUWB`）** 输出
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
 | `/perception_sensors/uwb_position` | `uwb_rtu_serial_demo/uwb_data` | 每收到一帧有效定位帧发布一次；频率跟随标签发包（动态默认约 10 Hz，静态可低至 0.05 Hz）；队列 10 |
+| `/perception_sensors/uwb_status` | `std_msgs/Bool` | 链路状态：`true` 在线 / `false` 串口未打开、读写异常或超过 15 s 无有效帧；跳变时发布，latched |
+
+**状态话题** `/perception_sensors/uwb_status`：判定用 `RtuClient::isAlive(15 s)`，已包含
+「串口未打开」「读写异常」「超时无有效帧」三种情况。阈值取 15 s 无帧告警值
+（`kHeartbeatTimeoutMs`），而不是 30 s 的重连阈值 `kLinkFailTimeoutMs`，让下游早 15 s
+知道数据失效；串口刚打开时 `last_frame_time` 被重置，有 15 s 宽限，不会因为还没收到帧
+就立刻报 `false`。节点首轮必发一次，之后只在 `true`/`false` 跳变时发布，latched 保留
+当前值。状态话题的发布频率反映跳变次数，不是数据频率，**不要用 `rostopic hz` 判断标签是否在工作**。
 
 `uwb_data.msg` 原文（[msg/uwb_data.msg](msg/uwb_data.msg)）：
 
@@ -76,7 +84,7 @@ float32 distance
 | 读写异常 | `available()` / `read()` / `write()` / `close()` 都可能因 USB 拔出抛异常，客户端内部捕获并置 `link_error_`，不再解析断线前残留的半帧 |
 | 重连动作 | `main` 在 30 Hz 外层循环检测，按 `next_reconnect` 节流调用 `RtuClient::reconnect()`：启动阶段 5 s、运行阶段 10 s |
 | 重连内容 | 关闭旧句柄 → 清空 `rx_buf_` 与心跳窗口 → 用最近一次 `open()` 记录的 port / baudrate / timeout 重新打开；不回放旧帧 |
-| 断线期间输出 | **不发布**、不补 0、不发空消息；话题只是停止更新，下游按超时判断 |
+| 断线期间输出 | `/perception_sensors/uwb_position` **不发布**、不补 0、不发空消息；15 s 无有效帧后 `/perception_sensors/uwb_status` 跳变为 `false`，下游应优先用它判断失效 |
 | 恢复判定 | `open()` 成功（串口重新打开且没有异常）；收到下一帧有效定位帧后立即恢复发布 |
 | 心跳告警 | 15 s 无帧只告警一次，不触发重连；30 s 才进入重连逻辑，避免标签静态休眠造成误重连 |
 | 日志 | 启动失败、重连失败分别由 `open()` / `reconnect()` 打印具体原因；1 Hz 心跳块对“串口异常等待重连”做 10 s 限流 |
@@ -223,6 +231,7 @@ rosrun uwb_rtu_serial_demo uwb_node
 ```bash
 rostopic echo /perception_sensors/uwb_position
 rostopic hz /perception_sensors/uwb_position
+rostopic echo -n1 /perception_sensors/uwb_status
 ```
 
 协议层面的硬约束：串口必须 **115200 8N1**，链路必须是 **TTL 电平**；本节点只读，

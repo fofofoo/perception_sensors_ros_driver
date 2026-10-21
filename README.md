@@ -63,7 +63,10 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | `/perception_sensors/processed_lidar_cloud` | `sensor_msgs/PointCloud2` | 发布 | ≈10 Hz | 窗口内 `frame_quantity` 帧逐点相加，启动后约 1 s 才有输出 |
 | `/perception_sensors/processed_lidar_connection_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；后启动的订阅者能立即拿到当前状态 |
 | `/perception_sensors/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 发布 | ≈3.3 Hz | 聚合消息，`radars[]` 为空表示本轮全部失败 |
+| `/perception_sensors/ultrasonic_radar_status/left_radar_502` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；`true` 本轮读到数据，`false` 超时/离线/未上线 |
+| `/perception_sensors/ultrasonic_radar_status/right_radar_503` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；判定口径同上 |
 | `/perception_sensors/uwb_position` | `uwb_rtu_serial_demo/uwb_data` | 发布 | 跟标签上报走 | 没有定位帧就不发布；消息无 `header` |
+| `/perception_sensors/uwb_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；`true` 在线，`false` 串口异常或 15 s 无有效帧 |
 | `/perception_sensors/recording_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched，录制中为 `true` |
 | `/perception_sensors/recording_size` | `std_msgs/Float64` | 发布 | 录制中 1 Hz + 停止时一次 | 当前批次现存分卷总大小（GB，GiB）；`delete_old` 后数值会下降 |
 | `/chassis_robot/chassis_status` | `std_msgs/Bool` | 订阅 | 由底盘决定 | `true`=开始保存，`false`=停止保存 |
@@ -83,6 +86,11 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 - **UWB**：坐标 cm→m，角度 1/100 度→度，测距为无符号 16 位。坐标系是基站本地坐标系，
   从基站正面看 X 负半轴在右、正半轴在左，Y 正半轴在前；基站背面无法正确解算。
   标签未定位时不发布消息，不会发 0。
+- **链路状态**：超声波每台网关一个 `std_msgs/Bool`，UWB 一个，均为「跳变时发布 + latched」：
+  节点首轮必发一次，之后只在 `true`/`false` 变化时发一条，后启动的订阅者用 latched 拿当前值。
+  `true` 表示链路可用（超声波=最近一轮读到寄存器，UWB=15 s 内收到过有效帧），
+  `false` 表示超时或断开。超声波读到全 0 mm 仍算在线（无目标不是通讯故障）。
+  **不要用 `rostopic hz` 判断设备在线**，这类话题的频率只反映状态跳变次数。
 - **录制**：文件名 `perception_sensors_<6位序号>_<YYYYmmdd_HHMMSS>_<分卷号>.bag`。
   序号在启动时扫描保存目录续号，时间戳只用于可读，时钟不准不会导致重名。
   单卷固定 10 GB，超过后 rosbag 自动创建下一卷；总上限与超限动作见启动参数表。
@@ -159,7 +167,9 @@ rosservice call /perception_sensors/stop_bag_recorder
 rostopic hz   /perception_sensors/processed_lidar_cloud
 rostopic echo -n1 /perception_sensors/processed_lidar_connection_status
 rostopic echo /perception_sensors/ultrasonic_radar_datas
+rostopic echo -n1 /perception_sensors/ultrasonic_radar_status/left_radar_502
 rostopic echo /perception_sensors/uwb_position
+rostopic echo -n1 /perception_sensors/uwb_status
 rostopic echo -n1 /perception_sensors/recording_status
 rostopic echo /perception_sensors/recording_size
 ```

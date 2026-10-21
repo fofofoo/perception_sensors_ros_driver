@@ -10,6 +10,15 @@ Modbus 网关端口（默认 502/503）读取 4 路探头寄存器，支持同�
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
 | `/perception_sensors/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 每轮一条，`radars[]` 聚合本轮所有读取成功的服务器，`name` 区分左右：`left_radar_502` / `right_radar_503` |
+| `/perception_sensors/ultrasonic_radar_status/left_radar_502` | `std_msgs/Bool` | 左网关状态：`true` 本轮读到寄存器，`false` 超时/离线/尚未上线 |
+| `/perception_sensors/ultrasonic_radar_status/right_radar_503` | `std_msgs/Bool` | 右网关状态，判定口径同上 |
+
+**状态话题**：每台服务器一个 `std_msgs/Bool`，话题名用服务器 `name` 作为子命名空间
+（`/perception_sensors/ultrasonic_radar_status/<name>`）。判定口径是「最近一轮轮询是否读到
+有效寄存器」：启动探测失败、后台重探中、读超时、网关忙或异常帧都是 `false`；读到全 0 mm
+仍是 `true`（无目标不是通讯故障）。节点首轮必发一次，之后只在 `true`/`false` 跳变时发布，
+latched 保留当前值，后启动的订阅者能立即拿到状态。状态是每轮刷新的，
+`rostopic hz` 不代表设备在线频率，只反映状态跳变次数。
 
 `radars[]` 中每个元素的字段：
 
@@ -61,7 +70,7 @@ ultrasonic_radar_data[] radars
 | 断线检测 | 单次读取超时 0.5 s（`timeout`）、connect 超时或被拒；读失败立即关闭 socket |
 | 重连动作 | 已上线服务器由主循环 `ensureConnected()` 重连，间隔 `reconnect_interval=1 s`；后台重探每次只试 1 次，失败顺延 30 s |
 | 并发边界 | 主线程只操作 `available=true` 的连接，后台线程只操作离线连接；状态由 `state_mutex_` 保护，重探不阻塞 0.3 s 轮询 |
-| 断线期间输出 | 每轮照常发布聚合话题，`radars[]` 为空；实测拔线期间话题仍约 3.8 Hz |
+| 断线期间输出 | 每轮照常发布聚合话题，`radars[]` 为空；实测拔线期间话题仍约 3.8 Hz。对应服务器的状态话题在同一轮跳变为 `false` |
 | 恢复判定 | 连接成功且能读到 4 路寄存器；恢复后下一轮即发布，无需重启 |
 | 日志 | 连接/读取/重探失败均为 5 s 限流 WARN；日志 5~6 s 一条不代表实际重试间隔（实际约 1 s） |
 
@@ -148,6 +157,8 @@ catkin_make --only-pkg-with-deps ultrasonic_radar_modbus_tcp \
 ```bash
 rostopic echo /perception_sensors/ultrasonic_radar_datas
 rostopic hz /perception_sensors/ultrasonic_radar_datas
+rostopic echo -n1 /perception_sensors/ultrasonic_radar_status/left_radar_502
+rostopic echo -n1 /perception_sensors/ultrasonic_radar_status/right_radar_503
 ```
 
 串口服务器的 502~505 是 Modbus 网关端口，网口侧必须发 Modbus TCP

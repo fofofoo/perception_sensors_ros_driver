@@ -1,17 +1,21 @@
 // 超声波雷达 Modbus TCP 节点入口。
 //
 // 职责边界：准备 ROS 参数、组装服务器列表、构造节点、创建发布器，并在
-// 事件循环里直观地完成三个大步骤：queryRadars()（问询/读取）、发布聚合话题、
-// 处理回调。单台服务器的重连、寄存器读取、距离换算等细节封装在
-// UltrasonicRadarNode 内。
+// 事件循环里直观地完成四个大步骤：queryRadars()（问询/读取）、发布聚合话题、
+// 发布每台服务器的在线状态、处理回调。单台服务器的重连、寄存器读取、距离换算
+// 等细节封装在 UltrasonicRadarNode 内。
+//
+// 话题：
+//   /perception_sensors/ultrasonic_radar_datas                    —— 数据，每轮一条
+//   /perception_sensors/ultrasonic_radar_status/<服务器 name>     —— 状态，跳变时一条
 //
 // 参数来源分两类：
 //   - 可由 launch 覆盖：网关 IP、两个端口、轮询周期、超时、重连间隔、打印开关；
-//   - 固定在本文件：从机地址、寄存器地址/数量、距离阈值、两个话题名，
-//     以及两个话题的发布器。
+//   - 固定在本文件：从机地址、寄存器地址/数量、距离阈值、话题名与发布器。
 // 参数默认值以字面量直接写在这里，现场接法一目了然。
 
 #include <ros/ros.h>
+#include <std_msgs/Bool.h>
 
 #include <clocale>
 #include <string>
@@ -123,8 +127,28 @@ int main(int argc, char** argv) {
     ros::Publisher array_pub =
         nh.advertise<ultrasonic_radar_modbus_tcp::ultrasonic_radar_datas>(array_topic, 10);
 
+    // 每台服务器一个在线状态话题，话题名直接用服务器 name 区分子命名空间：
+    //   /perception_sensors/ultrasonic_radar_status/left_radar_502
+    //   /perception_sensors/ultrasonic_radar_status/right_radar_503
+    // 类型 std_msgs/Bool：true=本轮读到数据，false=超时/离线/尚未上线。
+    // latched=true：后启动的订阅者也能立即拿到最近一次状态，不必等下一次跳变。
+    // 发布器顺序与 servers 一致，主循环按同样下标对应 serverStatuses()。
+    const std::string status_topic_prefix =
+        "/perception_sensors/ultrasonic_radar_status/";
+    std::vector<ros::Publisher> status_pubs;
+    status_pubs.reserve(servers.size());
+    for (const auto& server : servers) {
+        status_pubs.push_back(nh.advertise<std_msgs::Bool>(
+            status_topic_prefix + server.name, 10, true));
+    }
+
+    // 上一轮已发布的状态与「是否已发过首条」。首轮无论状态如何都发一次，
+    // 让 latched 话题从一开始就有值；之后只在跳变时发布。
+    std::vector<bool> last_online(servers.size(), false);
+    std::vector<bool> status_published(servers.size(), false);
+
     // —— 九、事件循环 ——
-    // 单线程循环，每轮三个大步骤；周期由 poll_interval 控制。
+    // 单线程循环，每轮四个大步骤；周期由 poll_interval 控制。
     // ros::Rate 按固定频率休眠；若某轮读取耗时超过周期，sleep() 会立即返回
     // 进入下一轮，不补发旧周期，避免消息堆积。
     ros::Rate rate(1.0 / config.poll_interval);
@@ -135,7 +159,30 @@ int main(int argc, char** argv) {
         // 2. 发布聚合话题：每轮必发一条，radars[] 为空表示本轮没有读到任何服务器。
         array_pub.publish(batch);
 
-        // 3. 处理 ROS 回调并休眠到下一周期。本节点当前没有订阅者，
+        // 3. 发布每台服务器的在线状态：首轮必发，之后只在 true/false 跳变时发一条。
+        //    online 由上面的 queryRadars() 按本轮读取结果刷新；启动探测失败、
+        //    后台重探中、读超时、网关忙都会是 false。
+        const auto statuses = node.serverStatuses();
+        for (size_t i = 0; i < statuses.size(); ++i) {
+            if (status_published[i] && statuses[i].online == last_online[i]) {
+                continue;
+            }
+
+            std_msgs::Bool status_msg;
+            status_msg.data = statuses[i].online;
+            status_pubs[i].publish(status_msg);
+
+            if (statuses[i].online) {
+                ROS_INFO("%s 在线", statuses[i].name.c_str());
+            } else {
+                ROS_WARN("%s 超时/离线", statuses[i].name.c_str());
+            }
+
+            last_online[i] = statuses[i].online;
+            status_published[i] = true;
+        }
+
+        // 4. 处理 ROS 回调并休眠到下一周期。本节点当前没有订阅者，
         //    spinOnce() 保留是为了后续扩展回调时无需改动循环结构。
         ros::spinOnce();
         rate.sleep();
