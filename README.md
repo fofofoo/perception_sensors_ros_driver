@@ -59,6 +59,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | `/perception_sensors/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 发布 | ≈3.3 Hz | 聚合消息，`radars[]` 为空表示本轮全部失败 |
 | `/perception_sensors/uwb_position` | `uwb_rtu_serial_demo/uwb_data` | 发布 | 跟标签上报走 | 没有定位帧就不发布；消息无 `header` |
 | `/perception_sensors/recording_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched，录制中为 `true` |
+| `/perception_sensors/recording_size` | `std_msgs/Float64` | 发布 | 录制中 1 Hz + 停止时一次 | 当前批次现存分卷总大小（GB，GiB）；`delete_old` 后数值会下降 |
 | `/chassis_robot/chassis_status` | `std_msgs/Bool` | 订阅 | 由底盘决定 | `true`=开始保存，`false`=停止保存 |
 | `/perception_sensors/start_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 开始录制；重复调用返回 `Already recording!` |
 | `/perception_sensors/stop_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 停止录制；未录制时返回 `Not recording!` |
@@ -79,6 +80,9 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 - **录制**：文件名 `perception_sensors_<6位序号>_<YYYYmmdd_HHMMSS>_<分卷号>.bag`。
   序号在启动时扫描保存目录续号，时间戳只用于可读，时钟不准不会导致重名。
   单卷固定 10 GB，超过后 rosbag 自动创建下一卷；总上限与超限动作见启动参数表。
+- **录制大小**：`/perception_sensors/recording_size` 单位 GB（GiB，1024³ 字节），
+  统计当前批次现存分卷（含正在写入的 `.bag.active`）；`delete_old` 删除旧卷后数值会下降，
+  反映的是磁盘占用而不是本次累计写入量。开始录制时发 0，停止时发一次最终值。
 
 ## 频率链
 
@@ -151,6 +155,7 @@ rostopic echo -n1 /perception_sensors/processed_lidar_connection_status
 rostopic echo /perception_sensors/ultrasonic_radar_datas
 rostopic echo /perception_sensors/uwb_position
 rostopic echo -n1 /perception_sensors/recording_status
+rostopic echo /perception_sensors/recording_size
 ```
 
 ## 已知陷阱

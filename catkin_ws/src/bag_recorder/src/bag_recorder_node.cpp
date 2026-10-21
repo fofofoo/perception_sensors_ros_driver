@@ -5,6 +5,7 @@
  * 职责边界：
  *   - 提供 start / stop 两个 Trigger 服务，fork 子进程执行 rosbag record；
  *   - 录制期间发布 latched 的 recording_status，供素材发布端做互斥；
+ *   - 录制期间每秒发布当前批次已录文件总大小（GB），停止时发布一次最终值；
  *   - 负责生成唯一、可排序的 bag 文件名，并保证不会覆盖已有文件。
  *
  * 文件名规则：
@@ -18,6 +19,7 @@
 #include <ros/ros.h>
 #include <std_srvs/Trigger.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/Float64.h>
 #include <ros/package.h>
 #include <xmlrpcpp/XmlRpcValue.h>
 
@@ -134,6 +136,7 @@ private:
     ros::ServiceServer start_srv_;
     ros::ServiceServer stop_srv_;
     ros::Publisher record_status_pub_;   // 录制状态广播（素材保存互斥信号源）
+    ros::Publisher recording_size_pub_;  // 当前批次已录文件总大小（GB，std_msgs/Float64）
 
     std::atomic<pid_t> record_pid_{-1};
     std::atomic<bool> is_recording_{false};
@@ -187,6 +190,10 @@ public:
         // 2026-10-21 由 /robot_detector/recording_status 迁入感知命名空间，
         // 外部订阅端需同步修改话题名。
         record_status_pub_ = nh_.advertise<std_msgs::Bool>("/perception_sensors/recording_status", 5, true);  // latched: 后到订阅者立即拿到当前状态
+        // 当前批次已录文件总大小，单位 GB（GiB，1024³ 字节）。
+        // 录制期间由总大小定时器每秒发布；开始录制发 0，停止时发一次最终值。
+        // 与状态话题不同，不 latch，避免新订阅者误以为录制仍在进行。
+        recording_size_pub_ = nh_.advertise<std_msgs::Float64>("/perception_sensors/recording_size", 5);
 
         // 总大小检查定时器：rosbag 没有总大小上限参数，录制期间由节点统计
         // 当前批次所有分卷（含正在写入的 .active）的总字节数。
@@ -310,6 +317,9 @@ public:
             status_msg.data = true;
             record_status_pub_.publish(status_msg);
 
+            // 新会话从 0 开始，订阅端据此重置显示；随后定时器每秒刷新实际大小。
+            publishRecordingSize(0.0);
+
             res.success = true;
             res.message = "Started. Path: " + first_bag_path + " | PID: " + std::to_string(pid);
             ROS_INFO_STREAM("[BagRecorder] Recording started (Background PID: " << pid << ")");
@@ -428,6 +438,9 @@ private:
             ROS_ERROR("[BagRecorder] Failed to send SIGINT, the process may have already exited.");
         }
 
+        // rosbag 已落盘，前缀仍然有效，此时统计最终大小；kill 失败时只能取当前值。
+        const double stopped_size_gb = currentRecordingGb();
+
         is_recording_.store(false);
         record_pid_.store(-1);
         current_bag_prefix_.clear();
@@ -436,6 +449,9 @@ private:
         std_msgs::Bool status_msg;
         status_msg.data = false;
         record_status_pub_.publish(status_msg);
+
+        // 停止后再发一次最终大小，之后不再更新；订阅端可据此显示本次结果。
+        publishRecordingSize(stopped_size_gb);
 
         if (message) {
             *message = ok ? "Recording stopped gracefully."
@@ -534,6 +550,22 @@ private:
         return total;
     }
 
+    // 当前批次现存分卷的总大小，单位 GB（GiB，1024³ 字节）。
+    // 注意：delete_old 删除旧分卷后，这个值会下降，反映的是磁盘占用而不是
+    // 本次累计写入量。
+    double currentRecordingGb() const {
+        const double bytes_per_gb = 1024.0 * 1024.0 * 1024.0;
+        return static_cast<double>(currentRecordingBytes()) / bytes_per_gb;
+    }
+
+    // 发布当前录制大小（std_msgs/Float64，单位 GB）。
+    // 录制期间每秒调用；开始录制时发 0；停止时在 rosbag 落盘后发一次最终值。
+    void publishRecordingSize(double size_gb) {
+        std_msgs::Float64 msg;
+        msg.data = size_gb;
+        recording_size_pub_.publish(msg);
+    }
+
     // 删除当前批次最旧的已关闭分卷，直到总大小不超过 cap_bytes。
     // 正在写入的 .bag.active 永远不删，避免破坏 rosbag 的输出文件。
     // 返回实际删除的分卷数量。
@@ -581,11 +613,14 @@ private:
         const uintmax_t cap_bytes =
             static_cast<uintmax_t>(max_bag_size_gb_ * bytes_per_gb);
         const uintmax_t total = currentRecordingBytes();
+        const double total_gb = static_cast<double>(total) / bytes_per_gb;
+
+        // 无论是否达到总上限，每秒都刷新一次当前批次大小（含正在写入的 .active）。
+        publishRecordingSize(total_gb);
+
         if (total < cap_bytes) {
             return;
         }
-
-        const double total_gb = static_cast<double>(total) / bytes_per_gb;
         if (total_limit_action_ == "delete_old") {
             const int deleted = deleteOldestClosedSplits(cap_bytes);
             if (deleted == 0 && !limit_warning_shown_) {
