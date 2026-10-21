@@ -1,22 +1,24 @@
 # perception_sensors_client_main
 
-感知传感器一键启动与保存按键联动节点。
+感知传感器一键启动与上装电源录制联动节点。
 
 ## 职责
 
 1. 提供顶层 launch，一次性拉起激光雷达、超声波、UWB、bag_recorder 和本节点；
-2. 订阅底盘保存按键状态 `/chassis_robot/chassis_status`（`std_msgs/Bool`）；
-3. 状态为 `true` 时调用 `/perception_sensors/start_bag_recorder`，为 `false` 时调用
+2. 订阅底盘控制消息 `/chassis_msg`（`common_msgs/ChassisMsg`）；
+3. 读取 `chassis_relay_ctrl.tops_power_enable`（上装电源使能）作为录制开关：
+   值为 `1` 时调用 `/perception_sensors/start_bag_recorder`，为 `0` 或其它异常值时调用
    `/perception_sensors/stop_bag_recorder`；
-4. 对状态去重，底盘周期重复发布时不会反复调用服务；服务失败会在下一帧自动重试。
+4. 对目标状态去重，底盘周期重复发布时不会反复调用服务；服务失败会在下一帧自动重试。
 
-本节点不发布任何话题，也没有主循环，完全由订阅回调驱动。
+本节点不发布任何话题，也没有主循环；以订阅回调驱动为主，另有一个 1 Hz 看门狗定时器
+负责 `/chassis_msg` 断流检测（超过 5 s 无消息自动停录）。
 
 ## 话题与服务
 
 | 名称 | 类型 | 方向 | 说明 |
 | --- | --- | --- | --- |
-| `/chassis_robot/chassis_status` | `std_msgs/Bool` | 订阅 | `true`=开始保存，`false`=停止保存 |
+| `/chassis_msg` | `common_msgs/ChassisMsg` | 订阅 | `chassis_relay_ctrl.tops_power_enable == 1` 开始保存，其余值停止保存 |
 | `/perception_sensors/start_bag_recorder` | `std_srvs/Trigger` | 调用 | 由 `bag_recorder_node` 提供 |
 | `/perception_sensors/stop_bag_recorder` | `std_srvs/Trigger` | 调用 | 由 `bag_recorder_node` 提供 |
 
@@ -24,9 +26,9 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `src/main.cpp` | 订阅、状态去重、服务调用 |
+| `src/main.cpp` | 订阅 `/chassis_msg`、状态去重、服务调用 |
 | `launch/perception_sensors_client_main.launch` | 一键启动全部节点 |
-| `CMakeLists.txt` / `package.xml` | 包配置 |
+| `CMakeLists.txt` / `package.xml` | 包配置（依赖 `common_msgs`） |
 
 ## 编译与运行
 
@@ -46,9 +48,21 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 
 ## 行为说明
 
-- 第一帧按键消息无论 `true`/`false` 都会执行一次服务调用，用于让录制状态与底盘同步。
+- 第一帧消息无论上装电源是开还是关都会执行一次服务调用，用于让录制状态与底盘同步。
+- 判据只认 `tops_power_enable == 1`；`0`、`-1` 等异常值都按关闭处理，避免无效状态误启录制。
+- **断流保护**：1 Hz 看门狗检测 `/chassis_msg`，若正在录制且超过 5 s 没收到消息，
+  自动调用 stop 服务停录。停录失败会在下一秒重试；底盘恢复发布且 `tops_power_enable` 仍为 1 时，
+  会重新开始录制。节点启动后从未收到消息时不触发。
 - 服务未注册时只打印 2 秒节流的告警，不阻塞节点；后续消息会继续重试。
 - `bag_recorder` 返回 `Already recording!` / `Not recording!` 时视为目标状态已达成，
   不重复调用；其它失败原因（如保存目录不可用）会原样打印并等下一帧重试。
-- 若底盘实际发布的不是 `std_msgs/Bool`，需要修改 `src/main.cpp` 中的订阅模板参数和
-  回调参数类型。
+- 消息类型由 `common_msgs` 包（与本包同级）定义；底盘实际发布的话题名或消息类型不同时，
+  需同步修改 `src/main.cpp` 的订阅模板参数与回调参数类型。
+
+## 依赖的消息包
+
+`common_msgs` 定义 `ChassisMsg` / `ChassisCtrl` / `TopMsg`，位于
+`catkin_ws/src/common_msgs/msg/`。`ChassisMsg.msg` 以 `common_msgs/ChassisCtrl`、
+`common_msgs/TopMsg` 内嵌另两个消息，因此包名必须固定为 `common_msgs`，
+不能把这些 msg 直接放进本包的 `msg/` 目录（否则生成类型会变成
+`perception_sensors_client_main/ChassisMsg`，与底盘发布端类型不匹配）。

@@ -3,9 +3,9 @@
       感知传感器一键启动。
 
       依次拉起：激光雷达驱动 + 预处理、超声波雷达、UWB、bag_recorder，
-      最后启动保存按键联动节点。按键节点只订阅
-      /chassis_robot/chassis_status（std_msgs/Bool），并调用
-      /perception_sensors/start_bag_recorder、/perception_sensors/stop_bag_recorder。
+      最后启动上装电源联动节点。联动节点只订阅
+      /chassis_msg（common_msgs/ChassisMsg），按 chassis_relay_ctrl.tops_power_enable
+      调用 /perception_sensors/start_bag_recorder、/perception_sensors/stop_bag_recorder。
     -->
 
     <!-- 超声波网关地址（现场网络可能不同） -->
@@ -36,7 +36,7 @@
         <arg name="total_limit_action" value="$(arg total_limit_action)"/>
     </include>
 
-    <!-- ================= 5. 保存按键联动 ================= -->
+    <!-- ================= 5. 上装电源联动 ================= -->
     <node name="perception_sensors_client_main"
           pkg="perception_sensors_client_main"
           type="perception_sensors_client_main_node"

@@ -2,7 +2,7 @@
 
 面向巡检/底盘设备的感知传感器 ROS 1 Noetic 工作区：接入速腾 Airy360 激光雷达、DYP 电应普超声波雷达
 和 UWB 基站，把三类数据统一发布到 `/perception_sensors/` 命名空间，并提供 rosbag 录制控制与
-底盘保存按键联动。
+底盘上装电源按键联动。
 
 ## 系统组成
 
@@ -13,7 +13,8 @@
 | [ultrasonic_radar_modbus_tcp](catkin_ws/src/ultrasonic_radar_modbus_tcp/) | Modbus TCP 网关采集两组各 4 路超声波 | `src/main.cpp` |
 | [uwb_rtu_serial_demo](catkin_ws/src/uwb_rtu_serial_demo/) | Modbus-RTU 串口解析 UWB 定位帧 | `src/main.cpp` |
 | [bag_recorder](catkin_ws/src/bag_recorder/) | 服务控制的 rosbag 录制/停止 | `src/bag_recorder_node.cpp` |
-| [perception_sensors_client_main](catkin_ws/src/perception_sensors_client_main/) | 顶层 launch 一键启动；底盘保存按键联动录制 | `src/main.cpp` |
+| [common_msgs](catkin_ws/src/common_msgs/) | 底盘控制消息定义（`ChassisMsg` / `ChassisCtrl` / `TopMsg`） | `msg/ChassisMsg.msg` |
+| [perception_sensors_client_main](catkin_ws/src/perception_sensors_client_main/) | 顶层 launch 一键启动；底盘上装电源联动录制 | `src/main.cpp` |
 
 各包的协议帧、寄存器、线程模型和参数细节以包内 README 与源码为准；`doc/` 下是原独立工程的文档副本，
 路径可能指向已不存在的工作区。
@@ -39,7 +40,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
                                                                      ▼
                                                         bag_recorder_node ──rosbag──► log/rosbag/
                                                                      ▲
-底盘 ──/chassis_robot/chassis_status──► perception_sensors_client_main
+底盘 ──/chassis_msg（common_msgs/ChassisMsg）──► perception_sensors_client_main
                                             │ start/stop 服务
                                             └──────────────────────────┘
 ```
@@ -53,7 +54,9 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   30 s 无有效帧时按 10 s 节流自动重连，插回 USB-TTL 后无需重启节点。判定细节、三种重连落点
   对比与拔串口测试步骤见
   [uwb_rtu_serial_demo/README.md](catkin_ws/src/uwb_rtu_serial_demo/README.md#掉线重连方案)。
-- 录制：服务事件驱动；保存按键节点只负责把底盘状态翻译成 start/stop 服务调用。
+- 录制：服务事件驱动；联动节点只负责把底盘上装电源使能（`tops_power_enable`）翻译成
+  start/stop 服务调用。另设 5 s 断流保护：底盘停止发布 `/chassis_msg` 时自动停录，
+  避免持续录制无控制键的数据。
 
 ## 话题与服务契约
 
@@ -69,7 +72,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | `/perception_sensors/uwb_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；`true` 在线，`false` 串口异常或 15 s 无有效帧 |
 | `/perception_sensors/recording_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched，录制中为 `true` |
 | `/perception_sensors/recording_size` | `std_msgs/Float64` | 发布 | 录制中 1 Hz + 停止时一次 | 当前批次现存分卷总大小（GB，GiB）；`delete_old` 后数值会下降 |
-| `/chassis_robot/chassis_status` | `std_msgs/Bool` | 订阅 | 由底盘决定 | `true`=开始保存，`false`=停止保存 |
+| `/chassis_msg` | `common_msgs/ChassisMsg` | 订阅 | 由底盘决定 | `chassis_relay_ctrl.tops_power_enable == 1` 开始保存，其余值停止保存；超过 5 s 无消息自动停录；消息定义见 `catkin_ws/src/common_msgs/` |
 | `/perception_sensors/start_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 开始录制；重复调用返回 `Already recording!` |
 | `/perception_sensors/stop_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 停止录制；未录制时返回 `Not recording!` |
 
@@ -144,7 +147,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | 超声波 | 设备只应答，不主动推送 | `poll_interval=0.3 s`，每轮遍历两个网关 | ≈3.3 Hz，每轮一条聚合消息 |
 | UWB | 标签驱动：动态默认约 10 Hz，上限 20 Hz；静态默认 0.1 Hz（可配置到 0.05 Hz） | 30 Hz 串口轮询，每轮取完缓冲 | 等于有效定位帧频率，不是固定 30 Hz |
 | 录制 | 事件驱动 | 服务 start/stop | 无周期 |
-| 保存按键 | 由底盘发布（频率未知） | 回调内按状态去重，仅跳变时调服务 | 无周期 |
+| 上装电源使能 | 由底盘发布（频率未知） | 回调内按 `tops_power_enable` 去重，仅跳变时调服务；1 Hz 看门狗检测断流，5 s 无消息自动停录 | 无周期 |
 
 轮询周期不等于话题频率；激光雷达多帧累加还存在约 `frame_quantity` 倍的数据量放大。
 
@@ -174,7 +177,7 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 ```
 
 顶层 launch 依次 include：`lidar_preprocess` → `ultrasonic_radar_modbus_tcp` → `uwb_rtu_serial_demo`
-→ `bag_recorder`，最后启动保存按键联动节点。
+→ `bag_recorder`，最后启动上装电源联动节点。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -214,37 +217,23 @@ rostopic echo /perception_sensors/recording_size
 
 ## 已知陷阱
 
-1. **话题命名漂移**：代码已统一到 `/perception_sensors/*`，但 `doc/` 和部分包 README 仍写旧名
-   （`/lidar/processed_cloud`、`/lidar/connection_status`、`/uwb_position` 等）。以代码中的
-   `advertise/subscribe` 为准。
-2. **WSL2 默认 NAT 收不到雷达 UDP**：需要 mirrored 网络，或在 Windows 侧做端口转发；
+1. **WSL2 默认 NAT 收不到雷达 UDP**：需要 mirrored 网络，或在 Windows 侧做端口转发；
    同时确认雷达网页里的点云目的地址是 `192.168.1.100`。
-3. **录制服务与状态话题已改名**：服务为 `/perception_sensors/start_bag_recorder`、
-   `/perception_sensors/stop_bag_recorder`，状态话题为 `/perception_sensors/recording_status`；
-   旧的 `/robot_detector/*` 名称不再存在，外部订阅端需同步修改。
-4. **单卷固定 10 GB，`max_bag_size_gb=25` 是单次录制总上限**：节点每秒统计当前批次
-   所有分卷（含正在写入的 `.bag.active`）。`total_limit_action=stop`（默认）时达到
-   25 GB 停止录制；`delete_old` 时删除最旧的已关闭分卷后继续，正在写入的卷不删。
-   删除以整卷为单位，因此 `delete_old` 下磁盘占用会在 15~25 GB 之间波动，而不是
-   精确停在 25 GB。`--split` 下首个文件实际带 `_0` 后缀。
-5. **保存目录默认在仓库根目录的 `log/rosbag`**：按 `bag_recorder` 包路径
+2. **单卷固定 10 GB，`max_bag_size_gb=25` 是单次录制总上限**：达到上限时 `stop`（默认）停录，
+   `delete_old` 按整卷删除最旧分卷后继续（占用在 15~25 GB 波动）；首个分卷文件名带 `_0` 后缀。
+3. **保存目录默认在仓库根目录的 `log/rosbag`**：按 `bag_recorder` 包路径
    `../../../log/rosbag` 推导；现场长期运行建议用 `save_dir` 指到数据盘。
-6. **`/chassis_robot/chassis_status` 按 `std_msgs/Bool` 实现**：如果底盘实际发布的是自定义消息，
-   订阅端不会报错但收不到数据，需要同时修改 `perception_sensors_client_main` 的订阅类型。
-7. **UWB 的重连阈值必须大于标签静态休眠间隔**：15 s 无帧只告警，30 s 才自动重连；
+4. **录制开关取自 `/chassis_msg` 的 `chassis_relay_ctrl.tops_power_enable`**：只有 `1` 算打开，
+   其余值按关闭处理；消息类型 `common_msgs/ChassisMsg` 定义在独立包 `catkin_ws/src/common_msgs/`。
+   正在录制时超过 5 s 没收到 `/chassis_msg` 会自动停录，恢复且仍为 `1` 时自动续录。
+5. **UWB 的重连阈值必须大于标签静态休眠间隔**：15 s 无帧只告警，30 s 才自动重连；
    标签静态休眠默认 10 s 发一包，若现场把静态间隔调到 30 s 以上，需同步调大
    `main.cpp` 的 `kLinkFailTimeoutMs`，否则会周期性做无意义的重连。断线期间不发布、
    不补 0，下游需按超时判断数据失效。
-8. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
-   可能不存在，读取协议和排障信息可以，按路径找代码不行。
-9. **终端里裸的 `ERRCODE_MSOPTIMEOUT` 来自激光雷达驱动，不是 ROS 日志**：现象是日志中间突然
-   冒出一行没有 `[WARN] [时间戳]` 前缀、没有节点名的 `ERRCODE_MSOPTIMEOUT`，还常夹在超声波
-   或 UWB 的输出之间，容易被误认为是它们的报错。原因是 `rs_driver` 的日志宏
-   （[rs_log.hpp](catkin_ws/src/rslidar_sdk-v1.5.20/src/rs_driver/src/rs_driver/common/rs_log.hpp)）
-   直接 `std::cout` 写标准输出，绕过 ROS 日志系统；多个节点的 `std::cout` 与 `rosout`
-   各自刷新，行序会互相穿插。该错误码由
-   [input_sock_epoll.hpp](catkin_ws/src/rslidar_sdk-v1.5.20/src/rs_driver/src/rs_driver/driver/input/unix/input_sock_epoll.hpp)
-   在 `epoll_wait` 等待 MSOP 包超时 1 s 时发出，经
-   [source_driver.hpp](catkin_ws/src/rslidar_sdk-v1.5.20/src/source/source_driver.hpp)
-   以 WARNING 级别打印，**每超时 1 s 报一次且不限流**。零星出现（网络抖动、丢包）可忽略，
-   节点不会退出；连续每秒刷说明雷达没在发包或主机收不到，按陷阱 2 检查网络与点云目的地址。
+6. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
+   可能不存在，读取协议和排障信息可以，按路径找代码不行。文档里的旧话题名
+   （`/lidar/processed_cloud`、`/lidar/connection_status`、`/uwb_position` 等）同样已过时，
+   以代码和本 README 的约定为准。
+7. **裸的 `ERRCODE_MSOPTIMEOUT` 来自激光雷达驱动**：`rs_driver` 用 `std::cout` 直接打印、
+   绕过 ROS 日志，所以没有 `[WARN]` 前缀和节点名。它是 MSOP 收包超过 1 s 的提示，零星出现可忽略；
+   连续每秒刷说明雷达没在发包或主机收不到，按陷阱 1 检查网络与点云目的地址。
