@@ -11,8 +11,8 @@
 | 话题 | 类型 | 方向 | 说明 |
 | --- | --- | --- | --- |
 | `/rslidar_points` | `sensor_msgs/PointCloud2` | 订阅 | 驱动原始点云，约 10 Hz；可通过参数覆盖 |
-| `/lidar/processed_cloud` | `sensor_msgs/PointCloud2` | 发布 | 滑动窗口累加结果 |
-| `/lidar/connection_status` | `std_msgs/Bool` | 发布 | `true` 在线 / `false` 超时；latched，仅在状态变化时发布 |
+| `/perception_sensors/processed_lidar_cloud` | `sensor_msgs/PointCloud2` | 发布 | 滑动窗口累加结果 |
+| `/perception_sensors/processed_lidar_connection_status` | `std_msgs/Bool` | 发布 | `true` 在线 / `false` 超时；latched，仅在状态变化时发布 |
 
 ### 输入点云语义
 
@@ -37,9 +37,10 @@
 - 心跳：每 1 s 检查一次最近收帧时间，超过 **20 s（代码写死）** 判为断连；
   - 断连时清空原始队列、窗口和处理结果缓存；
   - 恢复后重新积累满一个窗口再发布；
+  - **重连由上游 `rslidar_sdk` 内置处理，本包不实现重连逻辑**；本包只负责判定与清缓冲；
 - 主循环频率 10 Hz，每次循环 `spinOnce` 并通过 `getProcessedCloud` 取结果，有新结果才发布。
 
-从雷达到 `/lidar/processed_cloud` 的完整频率传递（含每帧数据量放大）见
+从雷达到 `/perception_sensors/processed_lidar_cloud` 的完整频率传递（含每帧数据量放大）见
 [仓库 README 的“数据链路与频率传递”](../../../README.md#6-数据链路与频率传递)。
 
 ## 参数
@@ -60,7 +61,7 @@ roslaunch lidar_preprocess lidar_preprocess.launch lidar_topic:=/rslidar_points 
 
 代码内写死、不支持 launch 修改的项（[lidar_preprocess.cpp](lidar_preprocess.cpp)）：
 
-- 输出话题 `/lidar/processed_cloud`、`/lidar/connection_status`；
+- 输出话题 `/perception_sensors/processed_lidar_cloud`、`/perception_sensors/processed_lidar_connection_status`；
 - 输出 `frame_id = rslidar`；
 - 心跳检查周期 1 s、超时 20 s；
 - 主循环频率 10 Hz。
@@ -91,13 +92,13 @@ roslaunch lidar_preprocess lidar_preprocess.launch
 
 ```bash
 rostopic hz /rslidar_points
-rostopic hz /lidar/processed_cloud
-rostopic echo -n1 /lidar/connection_status
+rostopic hz /perception_sensors/processed_lidar_cloud
+rostopic echo -n1 /perception_sensors/processed_lidar_connection_status
 ```
 
 ### 可视化
 
-本包自带一份 rviz 配置，`Fixed Frame` 已设为 `rslidar`，PointCloud2 直接订阅 `/lidar/processed_cloud`：
+本包自带一份 rviz 配置，`Fixed Frame` 已设为 `rslidar`，PointCloud2 直接订阅 `/perception_sensors/processed_lidar_cloud`：
 
 ```bash
 rosrun rviz rviz -d $(rospack find lidar_preprocess)/rviz/lidar_preprocess.rviz
@@ -115,7 +116,7 @@ rosrun rviz rviz -d $(rospack find lidar_preprocess)/rviz/lidar_preprocess.rviz
 | [include/lidar_sub.h](include/lidar_sub.h) | `zl_lidar::LidarSub` 类声明，职责与接口注释 |
 | [src/lidar_sub.cpp](src/lidar_sub.cpp) | 订阅回调、后台累加线程、心跳定时器 |
 | [launch/lidar_preprocess.launch](launch/lidar_preprocess.launch) | 启动驱动与节点，暴露 `lidar_topic`、`frame_quantity` |
-| [rviz/lidar_preprocess.rviz](rviz/lidar_preprocess.rviz) | 可视化配置，订阅 `/lidar/processed_cloud` |
+| [rviz/lidar_preprocess.rviz](rviz/lidar_preprocess.rviz) | 可视化配置，订阅 `/perception_sensors/processed_lidar_cloud` |
 | [CMakeLists.txt](CMakeLists.txt) | 可执行目标 `lidar_preprocess_node` |
 
 线程模型：
@@ -129,7 +130,7 @@ Worker 线程 ──维护滑动窗口──► 累加 ──► latest_result_
                                             │
                                      10 Hz 主循环轮询
                                             ▼
-                                    /lidar/processed_cloud
+                         /perception_sensors/processed_lidar_cloud
 ```
 
 - 订阅器和发布器由 `main` 创建，类只持有订阅器和定时器；
@@ -153,5 +154,5 @@ Worker 线程 ──维护滑动窗口──► 累加 ──► latest_result_
 
 - 输入源改为 `/rslidar_points`，launch 不再启动 Livox 驱动；
 - 类名、文件名、可执行名统一改为 `LidarSub` / `lidar_sub.*` / `lidar_preprocess_node`；
-- 输出话题改为 `/lidar/processed_cloud`、`/lidar/connection_status`；
+- 输出话题改为 `/lidar/processed_cloud`、`/lidar/connection_status`（当前已统一到 `/perception_sensors/*`）；
 - 输出 `frame_id` 改为 `rslidar`。

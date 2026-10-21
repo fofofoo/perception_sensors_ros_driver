@@ -73,6 +73,44 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | `/perception_sensors/start_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 开始录制；重复调用返回 `Already recording!` |
 | `/perception_sensors/stop_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 停止录制；未录制时返回 `Not recording!` |
 
+## 设备在线状态与重连参数
+
+三类传感器都有在线状态话题，均为 `std_msgs/Bool`、latched、**仅在状态跳变时发布**。
+`true` 表示链路可用，`false` 表示超时或断开。
+
+| 设备 | 状态话题 | 判 `false` 的条件 | 恢复方式 |
+| --- | --- | --- | --- |
+| 激光雷达 | `/perception_sensors/processed_lidar_connection_status` | 20 s 内没有收到点云 | 重连由 `rslidar_sdk` 内置处理，本仓库不实现；雷达恢复发包后自动恢复。`lidar_preprocess` 在超时期间清空累加窗口，恢复后要重新攒满 `frame_quantity` 帧（默认约 1 s）才输出点云 |
+| 超声波左（502） | `/perception_sensors/ultrasonic_radar_status/left_radar_502` | 本轮读寄存器失败：应答超时、连接被拒、网关忙或异常帧；启动探测失败也是 `false` | 已上线断线按 1 s 重连；启动就失败的端口由后台线程每 30 s 重探 |
+| 超声波右（503） | `/perception_sensors/ultrasonic_radar_status/right_radar_503` | 同上 | 同上 |
+| UWB | `/perception_sensors/uwb_status` | 串口未打开、读写异常，或 15 s 内没有 CRC 有效的整帧 | 启动打不开每 5 s 重试；运行中失联每 10 s 重连，插回串口后自动恢复 |
+
+重连相关参数：
+
+| 设备 | 参数 | 默认值 | 位置 | 含义 |
+| --- | --- | --- | --- | --- |
+| 激光雷达 | `timeout_sec` | 20 s | `lidar_preprocess.cpp` 写死 | 无点云多久判超时；launch 里的同名 arg（默认 5.0）没有注入节点，改它不生效 |
+| 激光雷达 | 心跳检查周期 | 1 s | `lidar_sub.cpp` 写死 | 定时器多久判一次连/断 |
+| 超声波 | `poll_interval` | 0.3 s | launch | 轮询周期；状态最多晚一轮（0.3 s）变化 |
+| 超声波 | `timeout` | 0.5 s | launch | TCP 连接与单次应答超时 |
+| 超声波 | `reconnect_interval` | 1.0 s | launch | 已上线服务器断线后的重连间隔 |
+| 超声波 | `reprobe_interval` | 30.0 s | launch | 启动探测失败端口的后台重探间隔；`0` 关闭 |
+| UWB | `kHeartbeatTimeoutMs` | 15 s | `uwb_rtu_serial_demo/src/main.cpp` 写死 | 无有效帧多久告警、状态话题置 `false` |
+| UWB | `kLinkFailTimeoutMs` | 30 s | 同上 | 连续无有效帧多久触发重连 |
+| UWB | `kStartupRetrySec` | 5 s | 同上 | 启动打不开串口时的重试间隔 |
+| UWB | `kRuntimeReconnectSec` | 10 s | 同上 | 运行中失联后的重连间隔 |
+
+几点语义：
+
+- 状态话题频率只反映跳变次数，**不能拿 `rostopic hz` 判断设备在线**；后启动的订阅者靠 latched 拿当前值。
+- UWB 的状态阈值（15 s）小于重连阈值（30 s）：下游先知道数据失效，节点随后才重连。
+- 超声波某一路 `false` 不代表节点故障：503 未接模组时它一直是 `false`，502 照常轮询。
+- 激光雷达在收到第一帧之前不做超时判定，也不会发布状态消息；从未收到数据的场景要看点云话题是否更新。
+- 激光雷达的重连交给 `rslidar_sdk` 内置处理，本仓库不写重连逻辑；`lidar_preprocess` 只做
+  超时判定与清缓冲（在 `LidarSub` 的心跳定时器里），细节见
+  [lidar_preprocess/README.md](catkin_ws/src/lidar_preprocess/README.md)。
+- 超声波与 UWB 的判定细节、实测恢复耗时见各自包 README 的「掉线重连方案」章节。
+
 ## 数据语义
 
 只列订阅方必须知道的约定，字段表见各包 README。
