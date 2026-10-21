@@ -83,7 +83,7 @@ bool UltrasonicRadarNode::start(std::string* error) {
     return false;
   }
 
-  // DYP 模组最多 4 路探头，寄存器从 1 号探头起连续排列。
+  // DYP 电应普超声波雷达模组最多 4 路探头，寄存器从 1 号探头起连续排列。
   if (config_.probe_count < 1 || config_.probe_count > 4) {
     if (error) *error = "probe_count 必须在 1~4 之间";
     return false;
@@ -311,9 +311,9 @@ ultrasonic_radar_data UltrasonicRadarNode::buildData(
 
 // 单路距离换算：mm → m。
 //
-// DYP 模组原始单位为 mm，读到 0 表示该路无有效回波（未接探头、无目标、
+// DYP 电应普超声波雷达模组原始单位为 mm，读到 0 表示该路无有效回波（未接探头、无目标、
 // 超量程），是正常读数而不是通讯故障。
-// 阈值判断用严格大于：恰好 0.1 m 也按无效处理，与旧 DYP 节点保持一致。
+// 阈值判断用严格大于：恰好 0.1 m 也按无效处理，与旧 DYP 电应普节点保持一致。
 // 无效时返回 -1.0 m，订阅方可以用 < 0 统一判断"该路无目标"。
 float UltrasonicRadarNode::toDistance(uint16_t millimeters) const {
   const double meters = static_cast<double>(millimeters) / 1000.0;

@@ -2,7 +2,7 @@
 <package format="2">
   <name>ultrasonic_radar_modbus_tcp</name>
   <version>0.1.0</version>
-  <description>多路 DYP 超声波雷达的 Modbus TCP 接入节点</description>
+  <description>多路 DYP 电应普超声波雷达的 Modbus TCP 接入节点</description>
   <maintainer email="zhangdie@todo.todo">zhangdie</maintainer>
   <license>TODO</license>
 

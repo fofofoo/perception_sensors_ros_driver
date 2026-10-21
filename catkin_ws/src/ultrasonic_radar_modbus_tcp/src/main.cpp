@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
     std::string gateway_ip = "192.168.1.15";  // M04 串口服务器 IP
     int port_1 = 503;                          // 网关端口，对应 HC1
     int port_2 = 502;                          // 网关端口，对应 HC0
-    const int slave_id = 1;  // RS485 侧 DYP 模组从机地址，固定值（0 为广播地址）
+    const int slave_id = 1;  // RS485 侧 DYP 电应普超声波雷达模组从机地址，固定值（0 为广播地址）
 
     // launch 在全局命名空间设置了同名参数时覆盖上面的默认值。
     nh.param("gateway_ip", gateway_ip, gateway_ip);
@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     ultrasonic_radar_modbus_tcp::RadarNodeConfig config;
 
     // —— 三、寄存器（固定值，不通过 launch 配置）——
-    // DYP 手册中 1~4 号探头对应 0x0106~0x0109，因此从 0x0106 起连续读 4 个。
+    // DYP 电应普手册中 1~4 号探头对应 0x0106~0x0109，因此从 0x0106 起连续读 4 个。
     config.start_register = 0x0106;  // 1 号探头寄存器（十进制 262）
     config.probe_count = 4;          // 连续读取 4 路：前/侧1/侧2/后
 

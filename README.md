@@ -1,6 +1,6 @@
 # perception_sensors_ros_driver
 
-面向巡检/底盘设备的感知传感器 ROS 1 Noetic 工作区：接入速腾 Airy360 激光雷达、DYP 超声波雷达
+面向巡检/底盘设备的感知传感器 ROS 1 Noetic 工作区：接入速腾 Airy360 激光雷达、DYP 电应普超声波雷达
 和 UWB 基站，把三类数据统一发布到 `/perception_sensors/` 命名空间，并提供 rosbag 录制控制与
 底盘保存按键联动。
 
@@ -23,7 +23,7 @@
 | 传感器 | 链路 | 地址 / 设备 | 关键参数 |
 | --- | --- | --- | --- |
 | Airy360 激光雷达 | 以太网 UDP | 雷达 `192.168.1.68`；主机 `192.168.1.100`；MSOP 6699 / DIFOP 7788 | `lidar_type: RSAIRY`，`use_lidar_clock: true` |
-| DYP 超声波（两组） | RS485 → M04 串口服务器 → 以太网 | 网关 `192.168.1.15`，502（车体左侧）/ 503（车体右侧） | RS485 9600 8N1，从机地址 1，每组 4 路探头 |
+| DYP 电应普超声波雷达（两组） | RS485 → M04 串口服务器 → 以太网 | 网关 `192.168.1.15`，502（车体左侧）/ 503（车体右侧） | RS485 9600 8N1，从机地址 1，每组 4 路探头 |
 | UWB 基站 | TTL UART → USB-TTL | 默认 `/dev/ttyUWB` | 115200 8N1，基站主动推送，PC 只读不写 |
 
 ## 数据流
@@ -33,7 +33,7 @@ Airy360 ──UDP 6699/7788──► rslidar_sdk_node ──/rslidar_points─�
                                                                       │
                                           /perception_sensors/processed_lidar_cloud
                                                                       ▼
-DYP ×2 ──RS485──► M04 ──Modbus TCP──► ultrasonic_radar_modbus_tcp ──┐
+DYP 电应普超声波雷达 ×2 ──RS485──► M04 ──Modbus TCP──► ultrasonic_radar_modbus_tcp ──┐
                                                                      │
 UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_position─┤
                                                                      ▼

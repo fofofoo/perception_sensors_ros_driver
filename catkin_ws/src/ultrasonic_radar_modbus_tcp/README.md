@@ -1,15 +1,15 @@
 # ultrasonic_radar_modbus_tcp
 
-DYP 超声波雷达的 Modbus TCP 接入节点。通过艾莫迅 RS485-ETH-M04 等串口服务器的
+DYP 电应普超声波雷达的 Modbus TCP 接入节点。通过艾莫迅 RS485-ETH-M04 等串口服务器的
 Modbus 网关端口（默认 502/503）读取 4 路探头寄存器，支持同时接入多个服务器。
 
-原有的串口 DYP 节点保留在 `ultrasonic_radar_dyp`，本包不修改它。
+原有的串口 DYP 电应普节点保留在 `ultrasonic_radar_dyp`，本包不修改它。
 
 ## 话题
 
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
-| `ultrasonic_radar_demo/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 每轮一条，`radars[]` 聚合本轮所有读取成功的服务器，`name` 区分左右：`left_radar_502` / `right_radar_503` |
+| `/perception_sensors/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 每轮一条，`radars[]` 聚合本轮所有读取成功的服务器，`name` 区分左右：`left_radar_502` / `right_radar_503` |
 
 `radars[]` 中每个元素的字段：
 
@@ -90,8 +90,9 @@ roslaunch ultrasonic_radar_modbus_tcp ultrasonic_radar_modbus_tcp.launch \
 ## 编译与运行
 
 ```bash
-cd /home/liyun/code/devices/ultrasonic_radar_demo/catkin_ws
-catkin_make -DPYTHON_EXECUTABLE=/usr/bin/python3
+cd /home/liyun/code/perception_sensors_ros_driver/catkin_ws
+conda deactivate
+catkin_make -j8
 source devel/setup.bash
 roslaunch ultrasonic_radar_modbus_tcp ultrasonic_radar_modbus_tcp.launch
 ```
@@ -106,12 +107,12 @@ catkin_make --only-pkg-with-deps ultrasonic_radar_modbus_tcp \
 查看数据：
 
 ```bash
-rostopic echo /ultrasonic_radar_demo/ultrasonic_radar_datas
-rostopic hz /ultrasonic_radar_demo/ultrasonic_radar_datas
+rostopic echo /perception_sensors/ultrasonic_radar_datas
+rostopic hz /perception_sensors/ultrasonic_radar_datas
 ```
 
 串口服务器的 502~505 是 Modbus 网关端口，网口侧必须发 Modbus TCP
-（MBAP + PDU，无 CRC），DYP 自定义帧不能直接通过 502 端口。
+（MBAP + PDU，无 CRC），DYP 电应普自定义帧不能直接通过 502 端口。
 
 ## 实现说明
 

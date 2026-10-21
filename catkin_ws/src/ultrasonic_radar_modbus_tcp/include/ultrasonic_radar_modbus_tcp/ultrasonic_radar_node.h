@@ -16,7 +16,7 @@ namespace ultrasonic_radar_modbus_tcp {
 
 // 一台串口服务器（Modbus 网关端口）的连接参数。
 // name 用于消息里区分数据来源；host/port 是网关地址；slave_id 是 RS485 侧
-// DYP 模组的从机地址。
+// DYP 电应普超声波雷达模组的从机地址。
 struct ServerConfig {
   std::string name;
   std::string host;
