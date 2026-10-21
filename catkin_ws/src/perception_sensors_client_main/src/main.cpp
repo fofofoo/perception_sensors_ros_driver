@@ -79,9 +79,7 @@ CallResult callTrigger(ros::ServiceClient& client, const char* action, bool want
 
 // 底盘保存按键回调：true=开始保存，false=停止保存。
 // 只在状态发生变化时动作；服务失败则保持旧状态，等下一帧重试。
-void chassisStatusCallback(const std_msgs::Bool::ConstPtr& msg,
-                           ros::ServiceClient* start_client,
-                           ros::ServiceClient* stop_client)
+void chassisStatusCallback(const std_msgs::Bool::ConstPtr& msg, ros::ServiceClient* start_client, ros::ServiceClient* stop_client)
 {
     const int want = msg->data ? 1 : 0;
     if (want == g_last_applied_state)
