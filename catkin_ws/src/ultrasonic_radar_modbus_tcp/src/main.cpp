@@ -86,10 +86,13 @@ int main(int argc, char** argv) {
     config.poll_interval = 0.3;       // 秒
     config.timeout = 0.5;             // 秒
     config.reconnect_interval = 1.0;  // 已探测到的服务器断线后的重连间隔（秒）
+    config.reprobe_interval = 30.0;   // 启动探测失败端口的重探间隔（秒）；0=关闭
     nh.param("poll_interval", config.poll_interval, config.poll_interval);
     nh.param("timeout", config.timeout, config.timeout);
     nh.param("reconnect_interval", config.reconnect_interval,
             config.reconnect_interval);
+    nh.param("reprobe_interval", config.reprobe_interval,
+            config.reprobe_interval);
 
     // —— 五、距离换算（固定值）——
     // 原始读数单位 mm；≤ 0.1 m 视为无有效回波（含 0 mm），统一发布 -1.0 m。

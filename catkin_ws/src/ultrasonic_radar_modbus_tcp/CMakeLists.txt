@@ -9,6 +9,9 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
 )
 
+# 节点内有后台重探线程（std::thread），需要显式链接 pthread。
+find_package(Threads REQUIRED)
+
 add_message_files(
   FILES
   ultrasonic_radar_data.msg
@@ -48,4 +51,5 @@ add_dependencies(ultrasonic_radar_modbus_tcp_node
 
 target_link_libraries(ultrasonic_radar_modbus_tcp_node
   ${catkin_LIBRARIES}
+  Threads::Threads
 )

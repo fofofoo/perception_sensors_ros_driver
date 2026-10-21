@@ -4,16 +4,20 @@
 //   本类负责「串口服务器 → 一批雷达数据」的编排：启动探测、按服务器维护连接、
 //   读取保持寄存器、把 mm 换算成米、组装消息。消息发布不在类内，由 main 的
 //   事件循环直接完成。Modbus TCP 的帧格式、半帧/粘包处理和 socket 细节都在
-//   ModbusTcpClient 中，本文件不直接操作 socket，也不创建线程。
+//   ModbusTcpClient 中，本文件不直接操作 socket。
 //
 // 线程模型：
-//   单线程。main 用 ros::Rate 驱动事件循环，每轮调用 queryRadars()（阻塞读取）
-//   并发布返回值；没有异步收发，因此成员状态无需加锁。
+//   主线程：main 用 ros::Rate 驱动事件循环，每轮调用 queryRadars()（阻塞读取）
+//   并发布返回值。
+//   后台线程：只在 reprobe_interval > 0 时启动，周期性重探启动时未上线的服务器。
+//   available / next_probe_attempt 由 state_mutex_ 保护；后台线程只访问
+//   available=false 的 client，主线程只访问 available=true 的 client，
+//   两边不会并发操作同一条连接。
 //
 // 数据流（由 main 的 ros::Rate 事件循环驱动）：
-//   启动探测（每台最多 2 次）
-//   每轮：queryRadars() → ensureConnected（必要时重连） → readServerRegisters
-//         → buildData →（可选）printRadarData
+//   启动探测（每台最多 2 次）；失败的服务器交给后台线程每 reprobe_interval 秒重探
+//   每轮：queryRadars() → 跳过未上线服务器 → ensureConnected（必要时重连）
+//         → readServerRegisters → buildData →（可选）printRadarData
 //         main 发布聚合话题
 //
 // 数据语义：
@@ -27,7 +31,9 @@
 
 #include "ultrasonic_radar_modbus_tcp/ultrasonic_radar_node.h"
 
+#include <chrono>
 #include <sstream>
+#include <system_error>
 #include <utility>
 
 namespace ultrasonic_radar_modbus_tcp {
@@ -40,11 +46,12 @@ UltrasonicRadarNode::UltrasonicRadarNode(
 {
 
     // 构造阶段做静态准备：保存配置、为每台服务器创建独立的 Modbus 客户端。
-    // 每台服务器用一个 ServerRuntime 表示，它把四类信息放在一起：
-    //   config       —— main 传来的静态连接参数（name / host / port / slave_id）；
-    //   client       —— 该服务器独享的 TCP 连接；
-    //   next_attempt —— 下一次允许重连的时间，用于重连节流；
-    //   available    —— 启动探测是否成功，失败的端口之后永久跳过。
+    // 每台服务器用一个 ServerRuntime 表示，它把以下信息放在一起：
+    //   config             —— main 传来的静态连接参数（name / host / port / slave_id）；
+    //   client             —— 该服务器独享的 TCP 连接；
+    //   next_attempt       —— 下一次允许重连的时间，用于重连节流；
+    //   available          —— 是否已上线并参与主循环轮询；
+    //   next_probe_attempt —— 离线服务器的下一次重探时间。
 
     // servers_是所有串口服务器runtime的容器。
     servers_.reserve(servers.size());
@@ -63,11 +70,23 @@ UltrasonicRadarNode::UltrasonicRadarNode(
 
         // 允许立即重连；探测成功后会在 start() 中重置为当前时间。
         runtime.next_attempt = ros::Time::now();
+        // 初始探测在 start() 中立即执行；失败后才会把重探时间顺延一个间隔。
+        // 这里先填当前时间，避免未初始化时间被后台线程误判。
+        runtime.next_probe_attempt = ros::Time::now();
 
         // ServerRuntime 含 unique_ptr，不可拷贝，只能移动到成员 vector 中；
         // 移动后 runtime 本身不再持有 client，节点析构时由 servers_ 负责释放。
         servers_.push_back(std::move(runtime));
     }
+}
+
+// 停止后台重探线程并等待退出。先置停止标志再 join，保证线程不会在
+// servers_ / client 析构后继续访问它们。线程未启动时 joinable() 为 false。
+UltrasonicRadarNode::~UltrasonicRadarNode() {
+  probe_stop_.store(true);
+  if (probe_thread_.joinable()) {
+    probe_thread_.join();
+  }
 }
 
 // ==================== 启动 ====================
@@ -133,15 +152,19 @@ bool UltrasonicRadarNode::start(std::string* error) {
   }
   ROS_INFO("寄存器: 起始=0x%04X(%d), 数量=%d", config_.start_register,
            config_.start_register, config_.probe_count);
-  ROS_INFO("轮询=%.2fs, 超时=%.2fs, 重连=%.2fs, 无效值=%.2fm",
+  ROS_INFO("轮询=%.2fs, 超时=%.2fs, 重连=%.2fs, 重探=%.1fs, 无效值=%.2fm",
            config_.poll_interval, config_.timeout, config_.reconnect_interval,
-           config_.invalid_distance);
+           config_.reprobe_interval, config_.invalid_distance);
 
   // —— 三、启动探测 ——
-  // 读不到寄存器的端口直接跳过并永久不再轮询，避免每轮都等它超时、
-  // 拖慢其他正常服务器。运行期间已探测成功的服务器断线则仍会重连。
+  // 读不到寄存器的端口不再永久跳过：标记 available=false，交给后台线程
+  // 每 reprobe_interval 秒重探。主循环只轮询已上线的服务器，离线端口不会
+  // 拖慢健康服务器；运行期间已上线服务器断线仍走 reconnect_interval 重连。
+  const bool reprobe_enabled = config_.reprobe_interval > 0.0;
+  const ros::Time startup_time = ros::Time::now();
   int available_count = 0;
-  for (ServerRuntime& server : servers_) {
+  for (size_t i = 0; i < servers_.size(); ++i) {
+    ServerRuntime& server = servers_[i];
     std::string probe_error;
     server.available = probeServer(&server, &probe_error);
 
@@ -151,14 +174,41 @@ bool UltrasonicRadarNode::start(std::string* error) {
                server.config.host.c_str(), server.config.port);
       server.next_attempt = ros::Time::now();
     } else {
-      ROS_WARN("未检测到 %s (%s:%d)，已跳过: %s", server.config.name.c_str(),
-               server.config.host.c_str(), server.config.port,
-               probe_error.c_str());
+      // 按服务器序号错开首次重探，避免多台离线网关在同一时刻被同时连接；
+      // 每台偏移 2 秒，对 30 秒量级的重探间隔可以忽略。
+      server.next_probe_attempt =
+          startup_time + ros::Duration(config_.reprobe_interval + i * 2.0);
+      if (reprobe_enabled) {
+        ROS_WARN("未检测到 %s (%s:%d)，%.1f 秒后后台重探: %s",
+                 server.config.name.c_str(), server.config.host.c_str(),
+                 server.config.port, config_.reprobe_interval,
+                 probe_error.c_str());
+      } else {
+        ROS_WARN("未检测到 %s (%s:%d)，周期重探已关闭，保持跳过: %s",
+                 server.config.name.c_str(), server.config.host.c_str(),
+                 server.config.port, probe_error.c_str());
+      }
     }
   }
 
   if (available_count == 0) {
-    ROS_ERROR("没有检测到任何超声波服务器，节点继续运行但不发布有效数据");
+    ROS_ERROR("没有检测到任何超声波服务器，节点继续运行但不发布有效数据%s",
+              reprobe_enabled ? "；后台线程将持续重探" : "");
+  }
+
+  // —— 四、启动后台重探线程 ——
+  // 线程创建失败不阻断节点：退回“离线端口永久跳过”的旧行为，健康服务器
+  // 仍可正常轮询。线程本身只处理 available=false 的服务器，不参与发布。
+  if (reprobe_enabled) {
+    try {
+      probe_thread_ = std::thread(&UltrasonicRadarNode::reprobeLoop, this);
+      ROS_INFO("后台重探已启动：每 %.1f 秒检查一次离线服务器（首次按序号错开）",
+               config_.reprobe_interval);
+    } catch (const std::system_error& e) {
+      ROS_ERROR("后台重探线程启动失败: %s；离线服务器将保持跳过状态", e.what());
+    }
+  } else {
+    ROS_INFO("reprobe_interval=%.1f，周期重探已关闭", config_.reprobe_interval);
   }
 
   return true;
@@ -169,29 +219,87 @@ bool UltrasonicRadarNode::start(std::string* error) {
 // 但会返回网关异常帧（例如 00 80 FF），所以必须完整走一次
 // 「连接 + 读保持寄存器」。
 //
-// 最多尝试 2 次：首次失败可能是网关刚上电或上一条连接尚未释放，
-// 重试一次能明显降低误跳过；仍失败才判定该端口不可用。
+// attempts 由调用方决定：启动探测用 2 次（首次失败可能是网关刚上电或上一条
+// 连接尚未释放，重试一次能明显降低误判）；后台周期重探用 1 次，失败就等
+// 下一个间隔，避免单次重探占用过久。
 // 每次失败都关闭 socket，避免把半开连接留给后续轮询。
-bool UltrasonicRadarNode::probeServer(ServerRuntime* server,
-                                      std::string* error) {
-  for (int attempt = 0; attempt < 2; ++attempt) {
+bool UltrasonicRadarNode::probeServer(ServerRuntime* server, std::string* error,
+                                      int attempts) {
+  for (int attempt = 0; attempt < attempts; ++attempt) {
     std::vector<uint16_t> registers;
-    if (server->client->connectTo(
-            server->config.host, static_cast<uint16_t>(server->config.port),
-            config_.timeout, error) &&
-        server->client->readHoldingRegisters(
-            static_cast<uint8_t>(server->config.slave_id),
-            static_cast<uint16_t>(config_.start_register),
-            static_cast<uint16_t>(config_.probe_count), &registers,
-            config_.timeout, error)) {
-      return true;
+    if (server->client->connectTo(server->config.host, static_cast<uint16_t>(server->config.port),config_.timeout, error)) 
+    {
+        if (server->client->readHoldingRegisters(static_cast<uint8_t>(server->config.slave_id), static_cast<uint16_t>(config_.start_register),static_cast<uint16_t>(config_.probe_count), &registers, config_.timeout, error)) 
+        {
+            return true;
+        }
     }
-
+        
     server->client->close();
     // 给网关一点恢复时间再重试；最后一次失败后不再等待。
-    if (attempt == 0) ros::Duration(0.1).sleep();
+    if (attempt + 1 < attempts) ros::Duration(0.1).sleep();
   }
   return false;
+}
+
+// 后台重探线程主体。
+// 每 200 ms 检查一次所有服务器：只挑 available=false 且 next_probe_attempt
+// 已到期的，调用一次 tryReProbe()。锁只包住状态读取，探测期间不持锁，
+// 因此主循环读取 available 不会被阻塞。
+void UltrasonicRadarNode::reprobeLoop() {
+  while (ros::ok() && !probe_stop_.load()) {
+    for (ServerRuntime& server : servers_) {
+      if (probe_stop_.load() || !ros::ok()) break;
+
+      bool due = false;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        due = !server.available &&
+              ros::Time::now() >= server.next_probe_attempt;
+      }
+      if (!due) continue;
+
+      tryReProbe(&server);
+    }
+
+    // 分片睡眠，让析构 join 不必等满一个完整周期；200 ms 相对 30 s 的
+    // 重探间隔可以忽略，也不会空转烧 CPU。
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+}
+
+// 重新探测一台离线服务器。
+// 成功：probeServer 已建立连接并读到寄存器，这里置 available=true 并把
+// next_attempt 重置为当前时间，主循环下一轮即可读取它。
+// 失败：probeServer 已关闭 socket，这里只顺延 next_probe_attempt。
+// 日志用 THROTTLE，避免每 30 秒刷屏。
+bool UltrasonicRadarNode::tryReProbe(ServerRuntime* server) {
+  std::string error;
+  const bool ok = probeServer(server, &error, 1);
+  const ros::Time now = ros::Time::now();
+
+  if (!ok) {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      server->next_probe_attempt =
+          now + ros::Duration(config_.reprobe_interval);
+    }
+    ROS_WARN_THROTTLE(30.0, "重新探测 %s (%s:%d) 失败: %s",
+                      server->config.name.c_str(),
+                      server->config.host.c_str(), server->config.port,
+                      error.c_str());
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    server->available = true;
+    server->next_attempt = now;
+  }
+  ROS_INFO("重新检测到 %s (%s:%d)，已加入轮询",
+           server->config.name.c_str(), server->config.host.c_str(),
+           server->config.port);
+  return true;
 }
 
 // ==================== 轮询 ====================
@@ -204,8 +312,14 @@ ultrasonic_radar_datas UltrasonicRadarNode::queryRadars() {
   batch.radars.reserve(servers_.size());
 
   for (ServerRuntime& server : servers_) {
-    // 启动探测失败或根本没有接线的端口，永久跳过，不占用轮询周期。
-    if (!server.available) continue;
+    // 离线服务器由后台线程重探，主循环不在这里等待连接。
+    // 只做一次短临界区读取，避免和后台线程的 available 更新竞争。
+    bool available = false;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      available = server.available;
+    }
+    if (!available) continue;
 
     // 连接断开时尝试重连；受 reconnect_interval 节流，失败不影响本轮其他服务器。
     if (!ensureConnected(&server)) continue;

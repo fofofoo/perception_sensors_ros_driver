@@ -42,10 +42,15 @@ ultrasonic_radar_data[] radars
 - `192.168.1.15:503`
 - `192.168.1.15:502`
 
-两个端口共用同一台串口服务器和同一个从机地址。节点启动时会逐个探测：能正常读到寄存器的才保留，读不到的
-（TCP 连不上、网关返回异常帧等）直接跳过，不再参与轮询，避免占用总线或
-拖慢其他组。新增服务器后需要重启节点重新探测。运行过程中已检测到的服务器
-若临时断线，仍会按 `reconnect_interval` 自动重连。
+两个端口共用同一台串口服务器和同一个从机地址。节点启动时会逐个探测：能正常读到寄存器的才进入轮询，
+读不到的（TCP 连不上、网关返回异常帧等）先跳过，**不占用主循环**；之后由后台线程每
+`reprobe_interval`（默认 30 s）重探一次，接好模组或恢复接线后自动上线，无需重启节点。
+前台探测失败的服务器首次重探时间按启动后 `reprobe_interval + i*2 s` 错开，避免多台同时连接。
+运行过程中已上线服务器断线，仍由主循环按 `reconnect_interval` 重连。
+
+实测（2026-10-21，拔插 M04 网线）：网线插回后，M04 在链路恢复初期约 30 s 内仍会拒绝
+TCP 连接（日志 `connect: 拒绝连接`），期间 ping 已通；节点每秒重试，网关恢复接受连接后
+自动上线，数据无需重启即可恢复。不要把这段等待误判为节点故障或重探失效。
 
 轮询周期默认 `0.3 s`。实测 250 ms 时 M04 会每几次请求返回一帧
 `00 80 FF` 网关忙应答，导致数据时断时续；300 ms 及以上稳定。
@@ -62,7 +67,8 @@ ultrasonic_radar_data[] radars
 | `port_2` | `502` | 第二个 Modbus 网关端口（HC0） |
 | `poll_interval` | `0.3` | 轮询周期，秒；实测 0.25 会触发网关忙错误 |
 | `timeout` | `0.5` | 连接和应答超时，秒 |
-| `reconnect_interval` | `1.0` | 断线重连间隔，秒 |
+| `reconnect_interval` | `1.0` | 已上线服务器断线后的重连间隔，秒 |
+| `reprobe_interval` | `30.0` | 启动探测失败服务器的后台重探间隔，秒；`0` 关闭周期重探（恢复永久跳过） |
 | `print_data` | `true` | 每轮打印 4 路原始 mm 值和换算距离 |
 | `debug_frames` | `false` | 打印 Modbus TCP 收发字节 |
 
@@ -120,7 +126,8 @@ rostopic hz /perception_sensors/ultrasonic_radar_datas
   - `src/main.cpp`：字面量默认参数、读取 launch 全局参数、组装服务器列表、
     创建发布器，并驱动事件循环（问询读取 → 发布聚合话题 → `spinOnce`）；
   - `src/ultrasonic_radar_node.cpp`：启动探测、按服务器维护连接与重连节流、
-    读取寄存器、mm→m 换算、打印；不持有句柄、发布器或话题名；
+    后台重探线程（`reprobeLoop` / `tryReProbe`）、读取寄存器、mm→m 换算、打印；
+    不持有句柄、发布器或话题名；
   - `src/modbus_tcp_client.cpp`：POSIX socket 实现的 Modbus TCP。
 - 发布器只建在 main 中，每轮发布一条 `ultrasonic_radar_datas`；
   节点类只返回组装好的消息。
@@ -128,4 +135,10 @@ rostopic hz /perception_sensors/ultrasonic_radar_datas
 - 只实现功能码 `0x03`（读保持寄存器），请求 12 字节，无 CRC。
 - 有接收缓冲区，能处理半帧、粘包和超时后迟到的旧应答。
 - 连接失败或读取失败时关闭 socket，下一轮自动重连。
-- 启动探测失败的端口（如未接模组的 503）永久跳过，不占用轮询周期。
+- 启动探测失败的端口（如未接模组的 503）不进入主循环轮询，由后台线程每
+  `reprobe_interval` 重探；重探的 connect/read 在主循环之外执行，单次最长约
+  `timeout`（0.5 s），不会拖慢健康服务器的 0.3 s 轮询。`available` 与
+  `next_probe_attempt` 由 `state_mutex_` 保护，主线程只访问已上线连接，
+  后台线程只访问离线连接，同一 socket 不会被两端并发使用。
+- 后台线程在节点析构时通过 `probe_stop_` + `join()` 退出；`reprobe_interval <= 0`
+  时不启动线程，退回“失败即永久跳过”的旧行为。

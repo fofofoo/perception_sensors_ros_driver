@@ -2,9 +2,12 @@
 
 #include <ros/ros.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <ultrasonic_radar_modbus_tcp/ultrasonic_radar_data.h>
@@ -34,6 +37,9 @@ struct RadarNodeConfig {
   double poll_interval = 0.3;       // 周期（s）：0.25 会让 M04 周期性返回网关忙
   double timeout = 0.5;             // 连接 / 单次应答超时（s）
   double reconnect_interval = 1.0;  // 已探测到的服务器断线后的重连间隔（s）
+  // 启动探测失败的服务器重新探测间隔（s）；<= 0 表示关闭周期重探，
+  // 恢复“失败即永久跳过”的旧行为。
+  double reprobe_interval = 30.0;
 
   // —— 距离（单位：米）——
   double min_valid_distance = 0.1;  // ≤ 该值视为无有效回波
@@ -53,12 +59,17 @@ class UltrasonicRadarNode {
   UltrasonicRadarNode(const std::vector<ServerConfig>& servers,
                       const RadarNodeConfig& config);
 
+  // 停止后台重探线程并等待其退出；必须在 servers_ 销毁前完成 join。
+  ~UltrasonicRadarNode();
+
   // 校验参数、打印启动配置、探测服务器。
-  // 参数非法或没有可用的服务器配置时返回 false，error 带回原因。
+  // 参数非法或 servers 为空时返回 false；全部探测失败仍返回 true，
+  // 由后台重探线程继续尝试，节点保持运行并发布空数组。
   bool start(std::string* error);
 
   // 问询并读取所有可用服务器，返回本轮可发布的数据。
-  // 读不到的服务器会在内部重连或跳过，不影响其他服务器。
+  // 已上线服务器断线时在内部按 reconnect_interval 重连；未上线的服务器
+  // 直接跳过，由后台线程重探，不阻塞本轮其他服务器。
   ultrasonic_radar_datas queryRadars();
 
  private:
@@ -68,11 +79,25 @@ class UltrasonicRadarNode {
     ServerConfig config;  // 静态连接参数：name / host / port / slave_id
     std::unique_ptr<ModbusTcpClient> client;  // 该服务器独享的 TCP 连接
     ros::Time next_attempt;  // 下一次允许重连的时间；未到则本轮跳过
-    bool available = false;  // 启动探测是否成功；失败则永久跳过
+    // 当前是否参与主循环轮询。启动探测失败时为 false，由后台线程重探；
+    // 成功上线后置 true，主循环随即开始读取。由 state_mutex_ 保护。
+    bool available = false;
+    // 下一次允许重新探测的时间。仅对 available=false 的服务器有意义，
+    // 由后台线程在失败后顺延 reprobe_interval；由 state_mutex_ 保护。
+    ros::Time next_probe_attempt;
   };
 
-  // 启动探测：最多尝试 2 次，能读到寄存器才算成功。
-  bool probeServer(ServerRuntime* server, std::string* error);
+  // 启动探测：最多尝试 attempts 次（默认 2），能读到寄存器才算成功。
+  // 每次失败都会关闭 socket，避免把半开连接留给后续轮询。
+  bool probeServer(ServerRuntime* server, std::string* error, int attempts = 2);
+
+  // 后台重探线程主体：轮询所有 available=false 且到期的服务器。
+  // 只做连接 + 读寄存器，不参与主循环发布，也不触碰 available=true 的连接。
+  void reprobeLoop();
+
+  // 重新探测一台离线服务器；成功时置 available=true，失败时顺延下次重探时间。
+  // 返回 true 表示本轮已上线，主循环可以开始读取它。
+  bool tryReProbe(ServerRuntime* server);
 
   // 确保连接可用；断线时按 reconnect_interval 节流重连。
   bool ensureConnected(ServerRuntime* server);
@@ -98,6 +123,17 @@ class UltrasonicRadarNode {
   // start() 的探测结果、每轮 queryRadars() 的读取、重连节流以及客户端释放
   // 都以这个 vector 为准；元素在构造后不再增删，只更新内部状态。
   std::vector<ServerRuntime> servers_;
+
+  // 保护 servers_ 中 available / next_probe_attempt 的跨线程读写。
+  // 主循环在 queryRadars() 里短临界区读取 available；后台线程在探测前后
+  // 更新状态。阻塞的 connect/read 不持锁，避免拖慢主循环。
+  std::mutex state_mutex_;
+
+  // 后台重探线程的退出标志；析构时先置 true 再 join。
+  std::atomic<bool> probe_stop_{false};
+
+  // 后台重探线程；reprobe_interval <= 0 时不会启动。
+  std::thread probe_thread_;
 
   // 全局运行参数（寄存器范围、轮询/超时、距离阈值、打印开关），
   // 由 main 组装后传入，节点内部只读。
