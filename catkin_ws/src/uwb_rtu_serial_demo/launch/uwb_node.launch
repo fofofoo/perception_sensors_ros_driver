@@ -7,6 +7,8 @@
     命令行覆盖示例：
       roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_serial_port:=/dev/ttyUSB0
       roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_print_frame:=false
+      roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_heartbeat_timeout_ms:=20000 \
+          uwb_link_fail_timeout_ms:=40000
   -->
 
   <!-- 基站 TTL 转串口设备；没有 udev 固定名时改成 /dev/ttyUSB0 等 -->
@@ -14,6 +16,19 @@
 
   <!-- 是否逐帧打印定位结果；正式运行可设为 false -->
   <param name="uwb_print_frame" value="true"/>
+
+  <!-- 无帧告警阈值，ms：超过该时长没有 CRC 有效帧时告警，并把
+       /perception_sensors/uwb_status 置为 false。需大于标签静态休眠间隔
+       （默认 10 s 才发一包），标签休眠调大时同步调大 -->
+  <param name="uwb_heartbeat_timeout_ms" value="15000"/>
+
+  <!-- 连续无有效帧触发重连的阈值，ms：必须大于 uwb_heartbeat_timeout_ms，
+       保证「先报失效、后重连」；也要大于标签静态休眠间隔 -->
+  <param name="uwb_link_fail_timeout_ms" value="30000"/>
+
+  <!-- 启动时打不开串口 / 运行中失联后的重连间隔，秒 -->
+  <param name="uwb_startup_retry_sec" value="5.0"/>
+  <param name="uwb_runtime_reconnect_sec" value="10.0"/>
 
   <node pkg="uwb_rtu_serial_demo" type="uwb_node" name="uwb_node" output="screen"/>
 </launch>

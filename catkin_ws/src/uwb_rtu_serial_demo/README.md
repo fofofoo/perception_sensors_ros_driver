@@ -13,9 +13,10 @@ D-PDOA-Node-B 基站经 **TTL UART（USB-TTL，默认 `/dev/ttyUWB`）** 输出
 | `/perception_sensors/uwb_status` | `std_msgs/Bool` | 链路状态：`true` 在线 / `false` 串口未打开、读写异常或超过 15 s 无有效帧；跳变时发布，latched |
 
 **状态话题** `/perception_sensors/uwb_status`：判定用 `RtuClient::isAlive(15 s)`，已包含
-「串口未打开」「读写异常」「超时无有效帧」三种情况。阈值取 15 s 无帧告警值
-（`kHeartbeatTimeoutMs`），而不是 30 s 的重连阈值 `kLinkFailTimeoutMs`，让下游早 15 s
-知道数据失效；串口刚打开时 `last_frame_time` 被重置，有 15 s 宽限，不会因为还没收到帧
+「串口未打开」「读写异常」「超时无有效帧」三种情况。阈值取无帧告警值
+（launch 参数 `uwb_heartbeat_timeout_ms`，默认 15 s），而不是失联重连阈值
+`uwb_link_fail_timeout_ms`（默认 30 s），让下游早 15 s 知道数据失效；串口刚打开时
+`last_frame_time` 被重置，有同样时长的宽限，不会因为还没收到帧
 就立刻报 `false`。节点首轮必发一次，之后只在 `true`/`false` 跳变时发布，latched 保留
 当前值。状态话题的发布频率反映跳变次数，不是数据频率，**不要用 `rostopic hz` 判断标签是否在工作**。
 
@@ -60,14 +61,16 @@ float32 distance
 - 轮询频率 **30 Hz**（`kLoopRateHz = 30.0`），每轮把缓冲中已到达的帧全部取完再发布；
   依据：标签动态默认 10 Hz、上限 20 Hz，30 Hz 约为数据频率的 1.5~3 倍；
 - 发布**跟帧走**：收一帧发一帧，不用定时器重发旧帧；话题频率等于有效定位帧频率；
-- 心跳：客户端按 1 秒窗口统计收帧频率；**15 s** 没有 CRC 有效帧时打印一次 `ROS_WARN`，
-  恢复后自动复位。阈值取 15 s 是因为标签静态休眠默认 10 s 才发一包，阈值过小会误报；
-- 串口打开失败：节点**不再退出**，打印 `ROS_ERROR` 后保持运行，由主循环每 **5 s** 重试；
-  单台设备掉线不应拖垮顶层 launch 里的其它传感器；
-- 运行中串口断开：自动重连，**不需要重启节点**；连续 **30 s** 没有有效帧（或读写异常）
-  触发重试，重连失败后每 **10 s** 再试，插回串口后自动恢复；
-- 30 Hz 外层轮询里只做轻量判断（`isAlive()`），真正的 `open()` 由 5 s / 10 s 节流控制，
-  不会每轮都尝试打开；
+- 心跳：客户端按 1 秒窗口统计收帧频率；**15 s**（`uwb_heartbeat_timeout_ms`）没有 CRC
+  有效帧时打印一次 `ROS_WARN`，恢复后自动复位。默认 15 s 是因为标签静态休眠默认 10 s
+  才发一包，阈值过小会误报；标签休眠调大时必须同步调大该参数；
+- 串口打开失败：节点**不再退出**，打印 `ROS_ERROR` 后保持运行，由主循环每 **5 s**
+  （`uwb_startup_retry_sec`）重试；单台设备掉线不应拖垮顶层 launch 里的其它传感器；
+- 运行中串口断开：自动重连，**不需要重启节点**；连续 **30 s**
+  （`uwb_link_fail_timeout_ms`）没有有效帧（或读写异常）触发重试，重连失败后每 **10 s**
+  （`uwb_runtime_reconnect_sec`）再试，插回串口后自动恢复；
+- 30 Hz 外层轮询里只做轻量判断（`isAlive()`），真正的 `open()` 由启动/运行两档间隔
+  （默认 5 s / 10 s）节流控制，不会每轮都尝试打开；
 - `uwb_print_frame = true` 时逐帧打印 x / y / distance / angle。
 
 ## 掉线重连方案
@@ -80,7 +83,7 @@ float32 distance
 | --- | --- |
 | 启动探测 | 打开 `uwb_serial_port` 指定的设备；成功则打印 `打开成功（115200 8N1）`，失败只打印 `ROS_ERROR`，节点继续运行 |
 | 启动失败 | 保持运行，首轮等 **5 s** 后重试，之后每 5 s 一次；期间不发布话题，不退出进程 |
-| 断线判据 | `RtuClient::isAlive(30000)` 为假：串口未打开、读写抛异常（`link_error_`），或 30 s 内没有 CRC 校验通过的整帧 |
+| 断线判据 | `RtuClient::isAlive(uwb_link_fail_timeout_ms)` 为假（默认 30 s）：串口未打开、读写抛异常（`link_error_`），或阈值内没有 CRC 校验通过的整帧 |
 | 读写异常 | `available()` / `read()` / `write()` / `close()` 都可能因 USB 拔出抛异常，客户端内部捕获并置 `link_error_`，不再解析断线前残留的半帧 |
 | 重连动作 | `main` 在 30 Hz 外层循环检测，按 `next_reconnect` 节流调用 `RtuClient::reconnect()`：启动阶段 5 s、运行阶段 10 s |
 | 重连内容 | 关闭旧句柄 → 清空 `rx_buf_` 与心跳窗口 → 用最近一次 `open()` 记录的 port / baudrate / timeout 重新打开；不回放旧帧 |
@@ -129,9 +132,9 @@ float32 distance
 
 ## 参数
 
-本包有 launch 文件 [launch/uwb_node.launch](launch/uwb_node.launch)。两个现场可调项放在
-`<node>` 外的全局命名空间，由 [main.cpp](src/main.cpp) 用 `nh.param` 读取；其余参数是
-`main.cpp` 顶部的字面量，修改后需要重新编译。
+本包有 launch 文件 [launch/uwb_node.launch](launch/uwb_node.launch)。心跳、重连与时序相关的
+现场可调项都放在 `<node>` 外的全局命名空间，由 [main.cpp](src/main.cpp) 用 `nh.param` 读取，
+`main.cpp` 顶部只保留同名字面量作为默认值；其余参数仍写死在源码里。
 
 ### launch 可调
 
@@ -139,12 +142,22 @@ float32 distance
 | --- | --- | --- |
 | `uwb_serial_port` | `/dev/ttyUWB` | 基站 TTL 转串口设备路径；无 udev 时改成 `/dev/ttyUSB0` 等 |
 | `uwb_print_frame` | `true` | 是否逐帧打印定位结果；正式运行可设 `false` |
+| `uwb_heartbeat_timeout_ms` | `15000` | 无帧告警阈值，ms：无有效帧多久告警、状态话题置 `false`；需大于标签静态休眠间隔（默认 10 s），休眠调大时同步调大 |
+| `uwb_link_fail_timeout_ms` | `30000` | 连续无有效帧触发重连的阈值，ms；必须大于 `uwb_heartbeat_timeout_ms`，且大于标签静态休眠间隔 |
+| `uwb_startup_retry_sec` | `5.0` | 启动打不开串口时的重试间隔，秒 |
+| `uwb_runtime_reconnect_sec` | `10.0` | 运行中失联后的最小重连间隔，秒 |
+
+非法值不会让节点退出：`uwb_link_fail_timeout_ms <= uwb_heartbeat_timeout_ms` 时自动改为
+「告警阈值 + 1 s」；其余 ≤ 0 的阈值回退到默认值，均打印 `ROS_WARN`。
 
 参数属于全局命名空间，命令行可直接覆盖：
 
 ```bash
 roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_serial_port:=/dev/ttyUSB0
 roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_print_frame:=false
+# 标签静态休眠调到 30 s：告警与重连阈值一起调大
+roslaunch uwb_rtu_serial_demo uwb_node.launch \
+    uwb_heartbeat_timeout_ms:=40000 uwb_link_fail_timeout_ms:=60000
 ```
 
 ### 源码固定（改后重编译）
@@ -153,10 +166,10 @@ roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_print_frame:=false
 | --- | --- | --- |
 | `kBaudrate` | `115200` | 波特率（手册 4.1 固定 115200 8N1，不要改） |
 | `kLoopRateHz` | `30.0` | 串口轮询频率，Hz；标签提频到 20 Hz 以上时再调 |
-| `kHeartbeatTimeoutMs` | `15000` | 无帧告警阈值，ms；标签静态休眠调大时同步调大 |
-| `kLinkFailTimeoutMs` | `30000` | 连续无有效帧触发重连的阈值，ms；必须大于告警阈值，且大于标签静态休眠间隔 |
-| `kStartupRetrySec` | `5.0` | 启动打不开串口时的重试间隔，秒 |
-| `kRuntimeReconnectSec` | `10.0` | 运行中失联后的最小重连间隔，秒 |
+| `kHeartbeatTimeoutMs` | `15000` | `uwb_heartbeat_timeout_ms` 的默认值，launch 可覆盖 |
+| `kLinkFailTimeoutMs` | `30000` | `uwb_link_fail_timeout_ms` 的默认值，launch 可覆盖 |
+| `kStartupRetrySec` | `5.0` | `uwb_startup_retry_sec` 的默认值，launch 可覆盖 |
+| `kRuntimeReconnectSec` | `10.0` | `uwb_runtime_reconnect_sec` 的默认值，launch 可覆盖 |
 
 ### 代码写死
 
@@ -182,12 +195,11 @@ roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_print_frame:=false
 | 单位换算 | cm → m `×0.01`；1/100 度 → 度 `×0.01` | 手册 4.4（1） |
 | CRC16 | 初值 `0xFFFF`，多项式 `0xA001`，低字节先发 | 手册 4.2 |
 
-> `uwb_serial_port` / `uwb_print_frame` 是 launch 全局参数；`rosrun` 的私有参数写法
-> `_uwb_serial_port:=...` **不生效**。
+> 上表参数都是 launch 全局参数；`rosrun` 的私有参数写法 `_uwb_serial_port:=...` **不生效**。
 
 ## 配置服务器
 
-launch 文件：[launch/uwb_node.launch](launch/uwb_node.launch)。两个现场可调项在 `<node>` 外
+launch 文件：[launch/uwb_node.launch](launch/uwb_node.launch)。现场可调项在 `<node>` 外
 定义，属于全局命名空间。
 
 ```bash
@@ -299,7 +311,7 @@ rostopic echo -n1 /perception_sensors/uwb_status
 | `uwb_node.cpp` | 不解析标签 ID | 多标签场景无法区分来源 |
 | `main.cpp` | 重连在 30 Hz 主循环内同步执行 | `open()` 失败通常很快返回，但设备异常时可能阻塞到驱动超时，期间的帧会延后处理 |
 | `main.cpp` | 重连只重开同一设备路径 | USB 重新枚举成 `/dev/ttyUSB1` 等新名字时，需改 launch 参数或补 udev 规则 |
-| `main.cpp` | 标签静态休眠超过 30 s 会触发无意义重连 | 重连成功会重置 `last_frame_time_`，约每 30 s 重开一次串口；不丢定位帧，但日志会周期性出现重连记录。标签静态间隔调大时，同步调大 `kLinkFailTimeoutMs` |
+| `main.cpp` | 标签静态休眠超过 30 s 会触发无意义重连 | 重连成功会重置 `last_frame_time_`，约每 30 s 重开一次串口；不丢定位帧，但日志会周期性出现重连记录。标签静态间隔调大时，同步调大 launch 参数 `uwb_link_fail_timeout_ms` |
 | `main.cpp` | 轮询频率、心跳与重连阈值仍写死 | 改这些值需重新编译（串口与打印开关已进 launch） |
 | `uwb_data.msg` | 无 `header` | 无精确时间戳、无坐标系标识 |
 | `rtu_client.cpp` | 只接受 03H 应答 | 将来下发 40H/50H 时需扩展应答解析 |

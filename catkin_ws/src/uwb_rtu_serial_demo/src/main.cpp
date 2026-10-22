@@ -27,9 +27,14 @@
  * PC 无需发送任何指令开启数据输出（手册 4.4（1））。
  */
 // ==================== 节点参数 ====================
-// 现场可调项放 launch 全局参数（launch/uwb_node.launch），main 用 nh.param 读取：
-//   uwb_serial_port：基站 TTL 转串口设备路径
-//   uwb_print_frame：是否逐帧打印定位结果
+// 现场可调项放 launch 全局参数（launch/uwb_node.launch），main 用 nh.param 读取，
+// 下面同名字面量仅作为默认值（直接 rosrun 时生效）：
+//   uwb_serial_port            ：基站 TTL 转串口设备路径
+//   uwb_print_frame            ：是否逐帧打印定位结果
+//   uwb_heartbeat_timeout_ms   ：无帧告警 / 状态话题置 false 的阈值，ms
+//   uwb_link_fail_timeout_ms   ：连续无有效帧触发重连的阈值，ms
+//   uwb_startup_retry_sec      ：启动打不开串口时的重试间隔，秒
+//   uwb_runtime_reconnect_sec  ：运行中失联后的最小重连间隔，秒
 // 其余参数属于协议固定值或内部调优值，直接写在 main 里。
 const uint32_t kBaudrate            = 115200;   // 手册 4.1：固定 115200 8N1，不要改
 const double   kLoopRateHz          = 30.0;     // 串口轮询频率，Hz；为标签默认 10 Hz / 上限 20 Hz 的 1.5~3 倍
@@ -62,21 +67,62 @@ int main(int argc, char* argv[])
     signal(SIGINT, mySigintHandler);
 
     // —— 一、读取现场参数 ——
-    // 两个现场可调项放 launch 全局命名空间（launch/uwb_node.launch），
-    // 默认值仍在此字面量可见；直接 rosrun 时使用默认值。
+    // 现场可调项放 launch 全局命名空间（launch/uwb_node.launch），
+    // 默认值仍以顶部字面量可见；直接 rosrun 时使用默认值。
     std::string serial_port;
     bool        print_frame;
+    int         heartbeat_timeout_ms;
+    int         link_fail_timeout_ms;
+    double      startup_retry_sec;
+    double      runtime_reconnect_sec;
     nh.param<std::string>("uwb_serial_port", serial_port, "/dev/ttyUWB");
     nh.param<bool>       ("uwb_print_frame", print_frame, true);
+    nh.param<int>        ("uwb_heartbeat_timeout_ms", heartbeat_timeout_ms, kHeartbeatTimeoutMs);
+    nh.param<int>        ("uwb_link_fail_timeout_ms", link_fail_timeout_ms, kLinkFailTimeoutMs);
+    nh.param<double>     ("uwb_startup_retry_sec", startup_retry_sec, kStartupRetrySec);
+    nh.param<double>     ("uwb_runtime_reconnect_sec", runtime_reconnect_sec, kRuntimeReconnectSec);
+
+    // 参数一致性校验：非法值直接回退，避免运行期出现「状态还没报失效就先重连」
+    // 或 while 循环里每轮都尝试重连（间隔 <= 0）。
+    // 告警阈值 <= 0 时 isAlive(0) 恒为假，会让状态话题一直 false，也按非法处理。
+    if (heartbeat_timeout_ms <= 0)
+    {
+        ROS_WARN("uwb_heartbeat_timeout_ms=%d 非法（需 > 0），回退为默认值 %d",
+                 heartbeat_timeout_ms, kHeartbeatTimeoutMs);
+        heartbeat_timeout_ms = kHeartbeatTimeoutMs;
+    }
+    // 重连阈值必须严格大于告警阈值：保留「先报失效、后重连」的时序语义。
+    // 回退到「告警阈值 + 1 s」而不是固定默认值，保证告警阈值被调大时依然成立。
+    if (link_fail_timeout_ms <= heartbeat_timeout_ms)
+    {
+        ROS_WARN("uwb_link_fail_timeout_ms=%d 必须大于 uwb_heartbeat_timeout_ms=%d，改为 %d",
+                 link_fail_timeout_ms, heartbeat_timeout_ms, heartbeat_timeout_ms + 1000);
+        link_fail_timeout_ms = heartbeat_timeout_ms + 1000;
+    }
+    if (startup_retry_sec <= 0.0)
+    {
+        ROS_WARN("uwb_startup_retry_sec=%.2f 非法（需 > 0），回退为默认值 %.2f",
+                 startup_retry_sec, kStartupRetrySec);
+        startup_retry_sec = kStartupRetrySec;
+    }
+    if (runtime_reconnect_sec <= 0.0)
+    {
+        ROS_WARN("uwb_runtime_reconnect_sec=%.2f 非法（需 > 0），回退为默认值 %.2f",
+                 runtime_reconnect_sec, kRuntimeReconnectSec);
+        runtime_reconnect_sec = kRuntimeReconnectSec;
+    }
+    ROS_INFO("UWB 参数：串口=%s，告警 %d ms，失联重连 %d ms，启动重试 %.1f s，运行重连 %.1f s",
+             serial_port.c_str(), heartbeat_timeout_ms, link_fail_timeout_ms,
+             startup_retry_sec, runtime_reconnect_sec);
 
     // —— 二、打开串口 ——
     // 打不开也继续运行：单设备掉线不应该拖垮顶层 launch 里的其它传感器；
-    // 主循环会用同一个 client 按 kStartupRetrySec 周期重试。
+    // 主循环会用同一个 client 按 startup_retry_sec 周期重试。
     uwb_rtu_serial_demo::RtuClient client;
     if (!client.open(serial_port, kBaudrate))
     {
         ROS_ERROR("串口 %s 打开失败，节点保持运行，每 %.0f s 重试",
-                  serial_port.c_str(), kStartupRetrySec);
+                  serial_port.c_str(), startup_retry_sec);
     }
     else
     {
@@ -102,14 +148,14 @@ int main(int argc, char* argv[])
     bool last_online = false;      // 上一轮已发布的链路状态
     bool status_published = false; // 是否已发过首条
 
-    // link_ever_ok 区分两种失败：启动就没打开（5 s 重试）和运行中掉线（10 s 重连）。
-    // 初始值取 open() 的结果；reconnect 成功后置 true。
+    // link_ever_ok 区分两种失败：启动就没打开（startup_retry_sec 重试）和运行中掉线
+    // （runtime_reconnect_sec 重连）。初始值取 open() 的结果；reconnect 成功后置 true。
     bool link_ever_ok = client.isOpen();
     auto next_reconnect = std::chrono::steady_clock::now();
     if (!link_ever_ok)
     {
         next_reconnect += std::chrono::milliseconds(
-            static_cast<int64_t>(kStartupRetrySec * 1000.0));
+            static_cast<int64_t>(startup_retry_sec * 1000.0));
     }
 
     // —— 四、主动轮询 + 发布 ——
@@ -150,12 +196,12 @@ int main(int argc, char* argv[])
             }
             else
             {
-                ROS_INFO("收帧频率：%u Hz", frequency);
-                const bool alive = client.isAlive(kHeartbeatTimeoutMs);
+                // ROS_INFO("UWB收帧频率：%u Hz", frequency);
+                const bool alive = client.isAlive(heartbeat_timeout_ms);
                 if (!alive && !stale_warned)
                 {
                     ROS_WARN("超过 %d ms 未收到有效帧，请检查串口连接、标签是否开机并已在 K 列表中",
-                             kHeartbeatTimeoutMs);
+                             heartbeat_timeout_ms);
                     stale_warned = true;
                 }
                 else if (alive)
@@ -166,16 +212,16 @@ int main(int argc, char* argv[])
         }
 
         // —— 五、链路探针与重连 ——
-        // 外层循环 30 Hz，检测很快；真正 open 按 5 s / 10 s 节流，不会每轮都重连。
+        // 外层循环 30 Hz，检测很快；真正 open 按启动/运行两档间隔节流，不会每轮都重连。
         // isAlive() 已包含 link_error_ 判断，拔线异常会立即进入该分支。
-        if (!client.isAlive(kLinkFailTimeoutMs))
+        if (!client.isAlive(link_fail_timeout_ms))
         {
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_reconnect)
             {
                 const double interval = link_ever_ok
-                                      ? kRuntimeReconnectSec
-                                      : kStartupRetrySec;
+                                      ? runtime_reconnect_sec
+                                      : startup_retry_sec;
                 next_reconnect = now + std::chrono::milliseconds(
                     static_cast<int64_t>(interval * 1000.0));
 
@@ -190,11 +236,11 @@ int main(int argc, char* argv[])
 
         // —— 六、发布链路状态 ——
         // isAlive() 已包含「串口未打开 / 读写异常 / 超时无有效帧」三种情况。
-        // 阈值取 15 s 告警阈值 kHeartbeatTimeoutMs，而不是 30 s 的重连阈值：
+        // 阈值取无帧告警阈值 heartbeat_timeout_ms，而不是失联重连阈值 link_fail_timeout_ms：
         // 下游要比重连早一步知道数据已失效。串口刚打开时 last_frame_time 被重置，
-        // 有 15 s 宽限，不会因为还没有帧就立刻报 false。
+        // 有同样时长的宽限，不会因为还没有帧就立刻报 false。
         // 只在 true/false 跳变时发布一条，latched 保留当前值。
-        const bool online = client.isAlive(kHeartbeatTimeoutMs);
+        const bool online = client.isAlive(heartbeat_timeout_ms);
         if (!status_published || online != last_online)
         {
             std_msgs::Bool status_msg;
@@ -208,7 +254,7 @@ int main(int argc, char* argv[])
             else
             {
                 ROS_WARN("UWB 链路超时/断开：串口未打开、读写异常或超过 %d ms 无有效帧",
-                         kHeartbeatTimeoutMs);
+                         heartbeat_timeout_ms);
             }
 
             last_online = online;

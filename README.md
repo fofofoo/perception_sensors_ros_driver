@@ -22,6 +22,9 @@
      20 s 心跳判定并在超时期间清空累加窗口。详见[设备在线状态与重连参数](#设备在线状态与重连参数)。
 
 2. **遥控器拨杆一键控制录制，存储自动循环覆盖**
+
+   ![遥控器照片，红圈位置为拨杆](images/遥控器.jpg)
+
    - 底盘把遥控器上装电源使能拨杆的状态发布到 `/chassis_msg`，`chassis_relay_ctrl.tops_power_enable == 1`
      自动开始录制，其余值自动停止；同一状态去重，服务失败下一帧重试；底盘消息断流超过 5 s 自动停录；
    - 录制内部有完整的存储控制：`--lz4` 压缩、单卷固定 10 GB、文件名带 6 位序号保证唯一与排序；
@@ -116,7 +119,9 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | 5 s 未收到 `/chassis_msg` | 正在录制则自动停录，恢复且仍为 `1` 时自动续录 |
 | 手动 `rosservice call` | 直接控制录制，不依赖底盘消息 |
 
-默认录制话题（`record_topics`）为三个感知结果话题，不含原始点云 `/rslidar_points` 与各类状态话题。
+默认录制话题（`record_topics`）为激光雷达原始点云 `/rslidar_points`、超声波与 UWB 两个感知结果话题；
+不含预处理累加点云 `/perception_sensors/processed_lidar_cloud` 与各类状态话题。原始点云单帧约 1.5 MB / 10 Hz，
+比 10 帧累加结果小约一个数量级，避免 rosbag 写入跟不上而丢帧。
 
 ### 保存目录与文件命名
 
@@ -234,10 +239,10 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 | 超声波 | `timeout` | 0.5 s | launch | TCP 连接与单次应答超时 |
 | 超声波 | `reconnect_interval` | 1.0 s | launch | 已上线服务器断线后的重连间隔 |
 | 超声波 | `reprobe_interval` | 30.0 s | launch | 启动探测失败端口的后台重探间隔；`0` 关闭 |
-| UWB | `kHeartbeatTimeoutMs` | 15 s | `uwb_rtu_serial_demo/src/main.cpp` 写死 | 无有效帧多久告警、状态话题置 `false` |
-| UWB | `kLinkFailTimeoutMs` | 30 s | 同上 | 连续无有效帧多久触发重连 |
-| UWB | `kStartupRetrySec` | 5 s | 同上 | 启动打不开串口时的重试间隔 |
-| UWB | `kRuntimeReconnectSec` | 10 s | 同上 | 运行中失联后的重连间隔 |
+| UWB | `uwb_heartbeat_timeout_ms` | 15 s | launch | 无有效帧多久告警、状态话题置 `false` |
+| UWB | `uwb_link_fail_timeout_ms` | 30 s | launch | 连续无有效帧多久触发重连 |
+| UWB | `uwb_startup_retry_sec` | 5 s | launch | 启动打不开串口时的重试间隔 |
+| UWB | `uwb_runtime_reconnect_sec` | 10 s | launch | 运行中失联后的重连间隔 |
 
 几点语义：
 

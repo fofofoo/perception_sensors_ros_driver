@@ -17,6 +17,8 @@
 
 #include "bag_recorder/bag_recorder_node.h"
 
+#include <locale.h>
+
 #include <ros/ros.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/Float64.h>
@@ -28,11 +30,13 @@
 
 namespace {
 
-// 没有配置 record_topics 时使用的默认话题，与当前感知链路保持一致。
+// 没有配置 record_topics 时使用的默认话题，与 launch 默认值保持一致。
 // launch 中的 record_topics 优先级更高；这里只作为兜底，避免参数缺失时录不到数据。
+// 激光雷达录原始点云而非预处理累加结果：单帧约 1.5 MB / 10 Hz，
+// 比 10 帧累加话题小约一个数量级，避免 rosbag 写入跟不上导致丢帧。
 std::vector<std::string> defaultTopics() {
     return {
-        "/perception_sensors/processed_lidar_cloud",
+        "/rslidar_points",
         "/perception_sensors/ultrasonic_radar_datas",
         "/perception_sensors/uwb_position",
     };
@@ -120,6 +124,10 @@ BagRecorderConfig loadConfig(ros::NodeHandle& nh) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // 终端按 UTF-8 输出中文日志。缺少这一行时 roslaunch 环境下中文会变成 "?"，
+    // 与工作区其它三个节点保持一致。
+    setlocale(LC_ALL, "");
+
     ros::init(argc, argv, "bag_recorder_node");
     ros::NodeHandle nh;
 

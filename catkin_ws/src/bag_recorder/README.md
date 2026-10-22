@@ -129,7 +129,7 @@ rosbag record --lz4 --split --size 10240 -O <save_dir>/perception_sensors_<序�
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `record_topics` | 三个感知话题 | 字符串数组；也兼容 `[/a, /b]` 字符串；缺失或为空时回退源码默认值 |
+| `record_topics` | 原始点云 + 两个感知话题 | 字符串数组；也兼容 `[/a, /b]` 字符串；缺失或为空时回退源码默认值 |
 | `save_dir` | 空 | 空表示按 `bag_recorder` 包路径推导 `<pkg>/../../../log/rosbag`，即仓库根目录的 `log/rosbag`；目录不存在时自动创建 |
 | `max_bag_size_gb` | `25.0` | 单次录制总大小上限（GB）；`<= 0` 时回退到 25.0 |
 | `total_limit_action` | `stop` | `stop` 停止录制；`delete_old` 删除最旧已关闭分卷后继续；其它值回退 `stop` |
@@ -140,8 +140,11 @@ rosbag record --lz4 --split --size 10240 -O <save_dir>/perception_sensors_<序�
 
 - 单卷大小 `10240` MB、`--lz4`、`--split`；
 - 文件名前缀 `perception_sensors_`、6 位序号、最大序号 `999999`；
-- 默认录制话题：`/perception_sensors/processed_lidar_cloud`、
+- 默认录制话题：`/rslidar_points`、
   `/perception_sensors/ultrasonic_radar_datas`、`/perception_sensors/uwb_position`；
+  激光雷达录原始点云而不是 `/perception_sensors/processed_lidar_cloud`——后者是
+  `frame_quantity` 帧（默认 10 帧）逐点累加的结果，带宽约高一个数量级，
+  实测会导致 rosbag 写入跟不上（`buffer exceeded`）并丢帧；
 - 大小检查周期 1 s；
 - 话题名、服务名、队列长度、latched 属性。
 
@@ -151,7 +154,7 @@ launch 用 `<param>` 配置标量参数，用 `<rosparam>` 配置话题数组：
 
 ```xml
 <rosparam param="record_topics">
-  - /perception_sensors/processed_lidar_cloud
+  - /rslidar_points
   - /perception_sensors/ultrasonic_radar_datas
   - /perception_sensors/uwb_position
 </rosparam>

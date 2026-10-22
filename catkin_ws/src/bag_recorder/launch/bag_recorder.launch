@@ -29,9 +29,16 @@
       录制话题列表，与源码默认值保持一致。
       使用 <rosparam> 而不是 <param value="[...]">，确保参数服务器里是字符串数组；
       节点同时兼容数组和 "[/a, /b]" 字符串两种写法。
+
+      激光雷达录原始点云 /rslidar_points 而不是预处理后的
+      /perception_sensors/processed_lidar_cloud：
+      后者是 frame_quantity 帧逐点累加的结果（默认 10 帧，约 10 倍点数与带宽），
+      实测 rosbag 写入跟不上，会持续报 "buffer exceeded" 并丢帧。
+      原始点云单帧约 1.5 MB、10 Hz，约 15 MB/s，落盘压力小得多；
+      需要累加结果时可离线用 lidar_preprocess 回放生成。
     -->
     <rosparam param="record_topics">
-      - /perception_sensors/processed_lidar_cloud
+      - /rslidar_points
       - /perception_sensors/ultrasonic_radar_datas
       - /perception_sensors/uwb_position
     </rosparam>
