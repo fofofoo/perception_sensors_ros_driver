@@ -1,8 +1,9 @@
 # perception_sensors_ros_driver
 
-面向巡检/底盘设备的感知传感器 ROS 1 Noetic 工作区：接入速腾 Airy360 激光雷达、DYP 电应普超声波雷达
-和 UWB 基站，把三类数据统一发布到 `/perception_sensors/` 命名空间，并提供 rosbag 录制控制与
-底盘上装电源按键联动。
+本项目面向巡检与底盘设备的 ROS 1 感知传感器数据处理工作：接入速腾 Airy360 激光雷达、DYP 电应普超声波雷达
+和 UWB 基站三类传感器，数据统一发布到 `/perception_sensors/` 命名空间，具备全设备掉线重连和在线状态感知功能；
+同时提供 rosbag 录制功能，并与底盘上装电源拨杆联动，实现拨杆一键开关录制。录制功能有完整的存储控制能力，
+单次录制数据最大 25 GB，保存目录最多留存 150 GB 数据，超限自动删除最旧数据，实现无人值守循环覆盖。
 
 ## 功能说明
 
@@ -91,6 +92,10 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   服务、定时器与 `ros::spin()`）和 `include/bag_recorder/bag_recorder_node.h` +
   `src/bag_recorder_node.cpp`（录制、统计、清理流水线），ROS 拓扑只在 main 中可见。
 
+rviz 累加点云、超声波数据、存储与链路状态、UWB 数据：
+
+![view.sh 实时查看：rviz 累加点云、超声波数据、存储与链路状态、UWB 数据](images/三传感器及录制状态数据展示.png)
+
 ## 数据存储
 
 三类传感器的数据不落盘到各自节点，统一由 [`bag_recorder`](catkin_ws/src/bag_recorder/)
@@ -122,6 +127,10 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 默认录制话题（`record_topics`）为激光雷达原始点云 `/rslidar_points`、超声波与 UWB 两个感知结果话题；
 不含预处理累加点云 `/perception_sensors/processed_lidar_cloud` 与各类状态话题。原始点云单帧约 1.5 MB / 10 Hz，
 比 10 帧累加结果小约一个数量级，避免 rosbag 写入跟不上而丢帧。
+
+遥控器拨杆触发录制开始和关闭：
+
+![拨杆触发录制](images/遥控器录制功能.png)
 
 ### 保存目录与文件命名
 
@@ -192,6 +201,10 @@ roslaunch bag_recorder bag_recorder.launch save_dir:=/data/rosbag max_bag_size_g
     total_limit_action:=delete_old max_dir_size_gb:=150 dir_low_watermark_gb:=130
 ```
 
+查看录制的 rosbag 包：
+
+![rosbag info 查看录制结果：单卷大小、时长、压缩率与两个被录话题](images/rosbag包录制结果.png)
+
 同一工作空间只应运行一个 `bag_recorder` 实例：服务名固定，多个实例还会竞争文件名序号。
 逐卷规则、实现细节与完整已知限制见
 [bag_recorder/README.md](catkin_ws/src/bag_recorder/README.md#已知限制)：
@@ -220,6 +233,7 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 ## 设备在线状态与重连参数
 
 系统持续检测传感器在线状态，并不断尝试重连
+
 ![系统持续检测传感器在线状态，并不断尝试重连](images/传感器不在线感知尝试重连.png)
 
 三类传感器都有在线状态话题，均为 `std_msgs/Bool`、latched、**仅在状态跳变时发布**。
@@ -376,6 +390,10 @@ EOF
 | 直接点窗口关闭按钮 | 发的是 SIGHUP，进程可能被强退；正在录制时可能残留 `.bag.active`，需 `rosbag reindex` |
 | 注销 / 重启 | 下次登录桌面时再次自启 |
 | 删除或禁用 `.desktop` | 下次登录不再自启（改 `X-GNOME-Autostart-enabled=false` 或删除文件） |
+
+开机自启动脚本，并在桌面打开对应终端：
+
+![开机后自动弹出的「感知传感器」终端，节点日志与运行状态直接可见](images/开机自启动.png)
 
 注意：
 
