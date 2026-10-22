@@ -361,6 +361,29 @@ rostopic echo /perception_sensors/recording_size
 rostopic echo /perception_sensors/recording_dir_size
 ```
 
+### 打包源码
+
+把当前提交导出成 zip 交付（不经过 `git clone`，也不含 `.git` 目录）：
+
+```bash
+cd /home/liyun/code/perception_sensors_ros_driver
+git archive --format=zip --prefix=perception_sensors_ros_driver/ \
+    --output=perception_sensors_ros_driver.zip HEAD
+```
+
+- 只导出 git **已跟踪**的内容：`catkin_ws/src/`、`doc/`、`README.md`、`.gitignore`。
+  `catkin_ws/build`、`devel`、`log/rosbag`、`.vscode`、`CLAUDE.md` 都不会入包，
+  对方解压后需要按[编译](#编译)一节重新构建。
+- 打包的是提交快照：工作区里未提交的修改不会进包，要带上就先用 `git commit`。
+  也可以把 `HEAD` 换成具体分支名或 tag，导出对应版本。
+- `--prefix` 让解压后得到 `perception_sensors_ros_driver/` 顶层目录；不需要时去掉该项。
+- `catkin_ws/src/CMakeLists.txt` 在 zip 中以符号链接条目存储，Linux 下 `unzip` 会还原成链接；
+  但在 Windows 上解压时可能变成一个普通文本文件，导致 `catkin_make` 报解析错误。
+  遇到这种情况在 WSL/Linux 里重建链接：
+  ```bash
+  ln -sf /opt/ros/noetic/share/catkin/cmake/toplevel.cmake catkin_ws/src/CMakeLists.txt
+  ```
+
 ## 已知陷阱
 
 1. **WSL2 默认 NAT 收不到雷达 UDP**：需要 mirrored 网络，或在 Windows 侧做端口转发；
