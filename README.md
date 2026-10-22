@@ -28,6 +28,7 @@
      单次录制默认 25 GB 上限（超限可停止或删除旧卷），保存目录默认 150 GB 高水位 / 130 GB 低水位，
      达到高水位后按最旧批次删除已关闭分卷，删到低水位停止，实现无人值守循环覆盖；
    - 录制状态与两个大小话题（当前批次、目录总量）实时可观测，`.bag.active` 永不删除。
+     触发链路、目录布局、两级上限与清理规则详见[数据存储](#数据存储)。
 
 一句话亮点：**三类传感器即插即用、断线自恢复；拨杆开关录制、磁盘占用自动封顶。**
 
@@ -86,6 +87,111 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   避免持续录制无控制键的数据。`bag_recorder` 自身拆为 `src/main.cpp`（参数、发布器、
   服务、定时器与 `ros::spin()`）和 `include/bag_recorder/bag_recorder_node.h` +
   `src/bag_recorder_node.cpp`（录制、统计、清理流水线），ROS 拓扑只在 main 中可见。
+
+## 数据存储
+
+三类传感器的数据不落盘到各自节点，统一由 [`bag_recorder`](catkin_ws/src/bag_recorder/)
+写入 rosbag。录制默认由底盘遥控器的上装电源拨杆驱动，也可以手动调服务；
+存储层设置**单次录制**与**保存目录总量**两道独立上限，后者通过高低水位清理实现无人值守循环覆盖。
+
+### 存储链路
+
+```text
+遥控器上装电源拨杆
+        │
+底盘 ──/chassis_msg（tops_power_enable）──► perception_sensors_client_main
+                                                    │ start / stop 服务（按目标状态去重）
+                                                    ▼
+                                bag_recorder_node ──拉起子进程──► rosbag record
+                                                                        ▲
+        3 个感知话题 ───────────────────────────────────────────────────┘
+                                                   --lz4 --split ──► save_dir
+```
+
+| 触发方式 | 行为 |
+| --- | --- |
+| `tops_power_enable == 1` | 调 `/perception_sensors/start_bag_recorder` 开始录制 |
+| 其它值（含 `0`、`-1`） | 调 `/perception_sensors/stop_bag_recorder` 停止录制 |
+| 状态未跳变 | 不重复调用；服务失败时保持旧状态，下一帧消息重试 |
+| 5 s 未收到 `/chassis_msg` | 正在录制则自动停录，恢复且仍为 `1` 时自动续录 |
+| 手动 `rosservice call` | 直接控制录制，不依赖底盘消息 |
+
+默认录制话题（`record_topics`）为三个感知结果话题，不含原始点云 `/rslidar_points` 与各类状态话题。
+
+### 保存目录与文件命名
+
+保存目录由 `save_dir` 指定；留空时按 `bag_recorder` 包路径推导为**仓库根目录的 `log/rosbag`**，
+目录不存在会自动创建，建议现场用绝对路径指向数据盘。
+
+```text
+log/rosbag/
+├── perception_sensors_000001_20261022_090000_0.bag      ← 第 1 次录制，第 0 卷
+├── perception_sensors_000001_20261022_090000_1.bag      ← 写满 10 GB 后自动分卷
+├── perception_sensors_000002_20261022_103000_0.bag
+└── perception_sensors_000003_20261022_140000_0.bag.active   ← 正在写入
+```
+
+文件名组成：
+
+| 字段 | 示例 | 说明 |
+| --- | --- | --- |
+| 固定前缀 | `perception_sensors_` | 目录清理只识别这个前缀的文件 |
+| 6 位批次序号 | `000003` | 启动时扫描目录续号，每次录制递增；唯一性与排序主键，最大 `999999` |
+| 时间戳 | `20261022_140000` | 仅用于人工识别，时钟重复或回退不影响唯一性 |
+| 分卷号 | `_0`、`_1`…… | 单卷固定 10 GB，`--split` 下首卷带 `_0` |
+| 后缀 | `.bag` / `.bag.active` | `.bag.active` 表示 rosbag 正在写入，停止后自动去掉 |
+
+录制子进程固定使用 `--lz4 --split --size 10240`；bag 内数据频率等于被录话题频率，
+本节点不做重采样或多帧拼接。
+
+### 两级容量上限
+
+| 层级 | 参数 | 默认值 | 统计范围 | 达到上限后的动作 |
+| --- | --- | --- | --- | --- |
+| 单次录制 | `max_bag_size_gb` | 25 GB | 当前批次现存分卷 | `stop`（默认）停止录制；`delete_old` 删除最旧已关闭分卷后继续 |
+| 保存目录 | `max_dir_size_gb` / `dir_low_watermark_gb` | 150 / 130 GB | `save_dir` 下所有批次 | 超过高水位后删到低水位；`max_dir_size_gb <= 0` 关闭清理 |
+
+两套上限**互相独立**：默认配置下单次录到 25 GB 就停，目录清理主要在多次录制累积到
+150 GB 时才生效。要让录制连续运行、完全依赖目录循环覆盖，需把 `total_limit_action`
+设为 `delete_old`，或调大 `max_bag_size_gb`。检查周期为 1 s，因此超限最多晚约 1 s 被发现。
+
+### 目录级清理规则
+
+- **高低水位状态机**：总量低于高水位时不动；一旦达到高水位进入清理，必须删到低水位才停，
+  避免每秒只删一卷。
+- **删除顺序**：按「批次序号 → 分卷号」从旧到新；先删历史批次，历史批次删完仍超限才删当前批次的旧分卷。
+- **正在写入的分卷永不删除**：`.bag.active` 不计入删除候选；只剩它仍超限时限流告警，不再刷屏。
+- **按整卷删除**：只删已关闭的完整分卷，实际总量可能比低水位再低最多一卷（10 GB）。
+- **两个时机**：每次开始录制前先做一次预清理；**停止录制后不清理**，刚录完的批次至少保留到下次开录。
+- 只统计和删除符合本节点命名规则的 `perception_sensors_*.bag`，目录里手动录制的其它 bag 不受影响。
+
+### 存储可观测性
+
+| 话题 | 单位 / 类型 | 发布时机 | 含义 |
+| --- | --- | --- | --- |
+| `/perception_sensors/recording_status` | `std_msgs/Bool`，latched | 仅跳变 | `true` 表示正在录制，可作素材保存互斥信号 |
+| `/perception_sensors/recording_size` | GB（GiB），`Float64` | start 发 0、录制中 1 Hz、stop 后一次 | 当前批次**现存**分卷总大小；`delete_old` 后数值会下降 |
+| `/perception_sensors/recording_dir_size` | GB（GiB），`Float64` | 开录前一次、录制中 1 Hz | 保存目录所有批次的总大小，是目录清理的依据 |
+
+两个大小话题按 **1024³ 字节**换算成 GB（GiB），不是 10⁹ 字节；`recording_dir_size`
+不能用 `recording_size` 推断。`recording_status` 不是周期心跳，`rostopic hz` 只反映跳变次数。
+
+### 查看与回放
+
+```bash
+rosbag info /data/rosbag/perception_sensors_000003_20261022_140000_0.bag
+rosbag play /data/rosbag/perception_sensors_000003_20261022_140000_0.bag
+
+# 单独启动录制节点并修改保存位置 / 上限
+roslaunch bag_recorder bag_recorder.launch save_dir:=/data/rosbag max_bag_size_gb:=25 \
+    total_limit_action:=delete_old max_dir_size_gb:=150 dir_low_watermark_gb:=130
+```
+
+同一工作空间只应运行一个 `bag_recorder` 实例：服务名固定，多个实例还会竞争文件名序号。
+逐卷规则、实现细节与完整已知限制见
+[bag_recorder/README.md](catkin_ws/src/bag_recorder/README.md#已知限制)：
+rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）、异常退出留下的残留 `.bag.active`
+需要人工处理、目录清理不可恢复等。
 
 ## 话题与服务契约
 
