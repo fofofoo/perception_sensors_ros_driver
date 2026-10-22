@@ -347,63 +347,47 @@ UWB 串口名在 `uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置；雷达
 
 ### 开机自启动（Jetson JetPack 5.1 / Ubuntu 20.04）
 
-用 systemd 托管 [run.sh](run.sh)：开机后不依赖桌面登录即启动全部节点，进程异常退出 5 s 后重试，
-日志进 `journalctl`。三步完成：
+Jetson 默认自动登录桌面，这里用**桌面自启动**托管 [run.sh](run.sh)：开机进入桌面后自动弹出一个
+标题为「感知传感器」的终端窗口，内容与手动执行 `./run.sh` 相同，节点日志直接可见。
 
 ```bash
 # 1. 脚本可执行；UWB 串口需要 dialout 组权限（重新登录或重启后生效）
 chmod +x run.sh
-sudo usermod -aG dialout "$USER"
+sudo usermod -aG dialout nvidia
 
-# 2. 写入服务单元（主控用户名 nvidia；ExecStart 指向部署后的 run.sh）
-sudo tee /etc/systemd/system/perception-sensors.service >/dev/null <<'EOF'
-[Unit]
-Description=Perception sensors ROS driver
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=nvidia
-Environment=HOME=/home/nvidia
-ExecStart=/data/code/perception_sensors_ros_driver/run.sh
-Restart=on-failure
-RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=60
-
-[Install]
-WantedBy=multi-user.target
+# 2. 写入自启动项（Exec 必须用部署后的绝对路径）
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/perception-sensors.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Perception Sensors
+Comment=开机启动感知传感器 ROS 节点
+Exec=gnome-terminal --title="感知传感器" -- /data/code/perception_sensors_ros_driver/run.sh
+X-GNOME-Autostart-enabled=true
 EOF
-
-# 3. 启用并观察
-sudo systemctl daemon-reload
-sudo systemctl enable --now perception-sensors.service
-systemctl status perception-sensors.service
-journalctl -u perception-sensors.service -f
 ```
 
-停止、禁用与确认开机状态：
+效果与操作：
 
-```bash
-sudo systemctl stop perception-sensors.service
-sudo systemctl disable perception-sensors.service
-systemctl is-enabled perception-sensors.service
-```
+| 操作 | 结果 |
+| --- | --- |
+| 开机自动登录桌面 | 自动弹出「感知传感器」终端窗口并开始采集，与手动运行 `./run.sh` 一致 |
+| 窗口内按 `Ctrl+C` | 发 SIGINT，roslaunch 正常退出，`bag_recorder` 让 `rosbag record` 落盘后退出 |
+| 直接点窗口关闭按钮 | 发的是 SIGHUP，进程可能被强退；正在录制时可能残留 `.bag.active`，需 `rosbag reindex` |
+| 注销 / 重启 | 下次登录桌面时再次自启 |
+| 删除或禁用 `.desktop` | 下次登录不再自启（改 `X-GNOME-Autostart-enabled=false` 或删除文件） |
 
 注意：
 
-- **`KillSignal=SIGINT` 不能省**：systemd 默认发 SIGTERM；`bag_recorder` 收到 SIGINT 才会向
-  `rosbag record` 转发 SIGINT 并 `waitpid`，保证分卷完整落盘。`TimeoutStopSec=60` 留给大分卷收尾。
-- **网络要先于服务就绪**：雷达要求主机地址 `192.168.1.100`，需在 NetworkManager 中配成静态 IP，
-  并确认 `NetworkManager-wait-online.service` 已启用。即使服务早于网卡启动，`rslidar_sdk`
-  和 UWB 节点也会自行重连，只是开机头几秒可能没有点云 / 定位。
+- **停止时先按 `Ctrl+C`，等窗口里各节点退出后再关窗口**。直接叉窗口不走 SIGINT 清理路径，
+  录制中的 rosbag 分卷可能不完整。
+- 自启动只在**有人登录桌面**时发生；关掉自动登录或不登录桌面时不会启动。与 systemd 相比，
+  它依赖桌面会话，但胜在输出直观、能直接操作。
 - **不要用 sudo 运行**：roslaunch 以 root 启动会让 `log/rosbag` 与 `~/.ros` 日志归属 root，
   之后普通用户运行会因权限失败。
-- **自启动只拉起采集，不会自动录包**：开录仍由底盘 `tops_power_enable == 1` 触发。
-- 需要“正常退出也重启”时把 `Restart=on-failure` 改成 `always`。
-- systemd 不读 `~/.bashrc`，ROS 环境由 [run.sh](run.sh) 里的 `source devel/setup.bash` 提供；
-  查看节点原始输出用 `journalctl -u perception-sensors.service -f`。
+- 自启动只拉起采集，**不会自动录包**：开录仍由底盘 `tops_power_enable == 1` 触发。
+- 网络或串口就绪较慢时，可在 `.desktop` 里加 `X-GNOME-Autostart-Delay=5` 延迟 5 s 启动；
+  即使不延迟，`rslidar_sdk` 与 UWB 节点也会自行重连，只是开机头几秒可能没有数据。
 
 ### 单独启动
 
