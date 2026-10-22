@@ -304,7 +304,7 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 ### 编译
 
 ```bash
-cd /home/liyun/code/perception_sensors_ros_driver/catkin_ws
+cd /data/code/perception_sensors_ros_driver/catkin_ws
 conda deactivate
 catkin_make -j8
 source devel/setup.bash
@@ -317,6 +317,9 @@ source devel/setup.bash
   要用 `catkin_make -DCATKIN_WHITELIST_PACKAGES=""` 复位。
 
 ### 一键启动
+
+日常运行和开机自启动都走仓库根目录的 [run.sh](run.sh)：它先切到 `catkin_ws`、加载
+`devel/setup.bash`，再执行下面的 launch，从任意目录调用都不会走错。也可以直接手动执行：
 
 ```bash
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch
@@ -339,6 +342,66 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 UWB 串口名在 `uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置；雷达网络参数在
 `rslidar_sdk-v1.5.20/config/config.yaml` 中配置。
 
+### 开机自启动（Jetson JetPack 5.1 / Ubuntu 20.04）
+
+用 systemd 托管 [run.sh](run.sh)：开机后不依赖桌面登录即启动全部节点，进程异常退出 5 s 后重试，
+日志进 `journalctl`。三步完成：
+
+```bash
+# 1. 脚本可执行；UWB 串口需要 dialout 组权限（重新登录或重启后生效）
+chmod +x run.sh
+sudo usermod -aG dialout "$USER"
+
+# 2. 写入服务单元（主控用户名 nvidia；ExecStart 指向部署后的 run.sh）
+sudo tee /etc/systemd/system/perception-sensors.service >/dev/null <<'EOF'
+[Unit]
+Description=Perception sensors ROS driver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+Environment=HOME=/home/nvidia
+ExecStart=/data/code/perception_sensors_ros_driver/run.sh
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 3. 启用并观察
+sudo systemctl daemon-reload
+sudo systemctl enable --now perception-sensors.service
+systemctl status perception-sensors.service
+journalctl -u perception-sensors.service -f
+```
+
+停止、禁用与确认开机状态：
+
+```bash
+sudo systemctl stop perception-sensors.service
+sudo systemctl disable perception-sensors.service
+systemctl is-enabled perception-sensors.service
+```
+
+注意：
+
+- **`KillSignal=SIGINT` 不能省**：systemd 默认发 SIGTERM；`bag_recorder` 收到 SIGINT 才会向
+  `rosbag record` 转发 SIGINT 并 `waitpid`，保证分卷完整落盘。`TimeoutStopSec=60` 留给大分卷收尾。
+- **网络要先于服务就绪**：雷达要求主机地址 `192.168.1.100`，需在 NetworkManager 中配成静态 IP，
+  并确认 `NetworkManager-wait-online.service` 已启用。即使服务早于网卡启动，`rslidar_sdk`
+  和 UWB 节点也会自行重连，只是开机头几秒可能没有点云 / 定位。
+- **不要用 sudo 运行**：roslaunch 以 root 启动会让 `log/rosbag` 与 `~/.ros` 日志归属 root，
+  之后普通用户运行会因权限失败。
+- **自启动只拉起采集，不会自动录包**：开录仍由底盘 `tops_power_enable == 1` 触发。
+- 需要“正常退出也重启”时把 `Restart=on-failure` 改成 `always`。
+- systemd 不读 `~/.bashrc`，ROS 环境由 [run.sh](run.sh) 里的 `source devel/setup.bash` 提供；
+  查看节点原始输出用 `journalctl -u perception-sensors.service -f`。
+
 ### 单独启动
 
 ```bash
@@ -349,6 +412,30 @@ roslaunch bag_recorder bag_recorder.launch
 rosservice call /perception_sensors/start_bag_recorder
 rosservice call /perception_sensors/stop_bag_recorder
 ```
+
+### 查看数据
+
+[view.sh](view.sh) 是手动运行的实时查看脚本，**不参与开机自启动**：
+
+```bash
+./view.sh    # 另开一个终端，节点需已由 ./run.sh 启动
+```
+
+启动 1 个 rviz 窗口 + 3 个终端窗口（依赖桌面版自带的 `gnome-terminal`）：
+
+| 窗口 | 内容 |
+| --- | --- |
+| rviz | 激光雷达点云，`lidar_preprocess.rviz`（Fixed Frame = `rslidar`，显示累加结果） |
+| 超声波数据 | `rostopic echo /perception_sensors/ultrasonic_radar_datas` |
+| UWB 数据 | `rostopic echo /perception_sensors/uwb_position` |
+| 存储与链路状态 | 每 1~2 s 刷新：录制状态、当前批次大小、保存目录总量、雷达 / UWB / 每台超声波网关链路 |
+
+- 状态面板用 `rostopic echo -n1` 逐项取当前值（latched 话题立即返回），2 s 无数据时显示
+  「无数据」，不会把面板卡住；大小话题在录制中 1 Hz 发布，可直接看到增长。
+- 想只看激光雷达原始单帧时，把脚本里的 `-d` 配置换成 `rslidar_sdk/rviz/rviz.rviz`
+  （显示 `/rslidar_points`）。
+- `Ctrl+C` 收起 rviz；三个终端窗口各自独立，直接关窗口即可。只关心某一路时，也可以按
+  [验证](#验证)里的 `rostopic` 命令手动查看。
 
 ### 验证
 
@@ -371,12 +458,12 @@ rostopic echo /perception_sensors/recording_dir_size
 把当前提交导出成 zip 交付（不经过 `git clone`，也不含 `.git` 目录）：
 
 ```bash
-cd /home/liyun/code/perception_sensors_ros_driver
+cd /data/code/perception_sensors_ros_driver
 git archive --format=zip --prefix=perception_sensors_ros_driver/ \
     --output=perception_sensors_ros_driver.zip HEAD
 ```
 
-- 只导出 git **已跟踪**的内容：`catkin_ws/src/`、`doc/`、`README.md`、`.gitignore`。
+- 只导出 git **已跟踪**的内容：`catkin_ws/src/`、`doc/`、`README.md`、`run.sh`、`view.sh`、`.gitignore`。
   `catkin_ws/build`、`devel`、`log/rosbag`、`.vscode`、`CLAUDE.md` 都不会入包，
   对方解压后需要按[编译](#编译)一节重新构建。
 - 打包的是提交快照：工作区里未提交的修改不会进包，要带上就先用 `git commit`。

@@ -191,7 +191,7 @@ int main(int argc, char* argv[])
             if (client.linkError())
             {
                 // 串口都没打开时不打印 0 Hz，避免每 5 s 重试期间刷屏
-                ROS_WARN_THROTTLE(10.0, "串口未打开或读写异常，等待重连");
+                ROS_WARN_THROTTLE(10.0, "UWB串口未打开或读写异常，等待重连");
                 stale_warned = true;
             }
             else

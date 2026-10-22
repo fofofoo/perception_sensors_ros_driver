@@ -98,7 +98,8 @@ private:
     std::atomic<bool> running_{true};
     
     ros::Time last_message_time_;
-    std::mutex state_mutex_; // 保护心跳时间戳的互斥锁
+    ros::Time last_warn_time_;   // 无数据告警的限流时间戳；只在 timerCallback（ROS 回调线程）读写
+    std::mutex state_mutex_;     // 保护心跳时间戳的互斥锁
 
     std::atomic<bool> is_lidar_connect_{false};
     std::atomic<bool> status_changed_flag_{false}; // 连接状态变化标志

@@ -38,6 +38,9 @@
   - 断连时清空原始队列、窗口和处理结果缓存；
   - 恢复后重新积累满一个窗口再发布；
   - **重连由上游 `rslidar_sdk` 内置处理，本包不实现重连逻辑**；本包只负责判定与清缓冲；
+  - 启动后迟迟收不到首帧、以及断连持续期间，每 **15 s** 打印一次 `ROS_WARN`
+    （源码常量 `DISCONNECT_WARN_INTERVAL_SEC`），避免 1 Hz 心跳检查刷屏；
+    首帧未到时不判定断连，只打印「尚未收到点云」；
 - 主循环频率 10 Hz，每次循环 `spinOnce` 并通过 `getProcessedCloud` 取结果，有新结果才发布。
 
 从雷达到 `/perception_sensors/processed_lidar_cloud` 的完整频率传递（含每帧数据量放大）见

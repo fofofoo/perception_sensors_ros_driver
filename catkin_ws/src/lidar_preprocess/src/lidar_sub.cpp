@@ -1,10 +1,18 @@
 #include "lidar_sub.h"
 
+namespace {
+
+// 无数据告警的最小间隔，秒。
+// 心跳定时器 1 Hz，不加限流会每秒刷一条；15 s 让现场看日志时既不刷屏也不容易漏掉。
+constexpr double DISCONNECT_WARN_INTERVAL_SEC = 15.0;
+
+}  // namespace
+
 namespace zl_lidar {
 
 LidarSub::LidarSub(ros::NodeHandle& nh, const std::string& topic, int frame_quantity, double timeout_sec)
     : nh_(nh), topic_name_(topic), frame_quantity_(frame_quantity), timeout_sec_(timeout_sec),
-      last_message_time_(ros::Time(0)) 
+      last_message_time_(ros::Time(0)), last_warn_time_(ros::Time(0))
 {
     sub_lidar_ = nh_.subscribe(topic_name_, 10, &LidarSub::lidarCallback, this);
     
@@ -126,19 +134,32 @@ void LidarSub::timerCallback(const ros::TimerEvent&) {
         last_time = last_message_time_;
     }
 
-    // 初始状态保护：未收到首帧数据前不判定超时
-    if (last_time == ros::Time(0)) return; 
+    const ros::Time now = ros::Time::now();
 
-    bool is_connected = (ros::Time::now() - last_time).toSec() < timeout_sec_;
-    
+    // 初始状态保护：未收到首帧数据前不判定超时，避免节点刚启动就误报断连。
+    // 但雷达没上电、网线没插或点云目的地址配错时，这里会一直静默；
+    // 补一条 15 s 限流告警，让现场能看出「一个点都没收到」。
+    if (last_time == ros::Time(0)) {
+        if (last_warn_time_ == ros::Time(0) ||
+            (now - last_warn_time_).toSec() >= DISCONNECT_WARN_INTERVAL_SEC) {
+            ROS_WARN("[LidarSub] No point cloud received on %s yet. "
+                     "Check LiDAR power, network and destination address.",
+                     topic_name_.c_str());
+            last_warn_time_ = now;
+        }
+        return;
+    }
+
+    bool is_connected = (now - last_time).toSec() < timeout_sec_;
+
     // 状态边沿检测
     if (is_connected != is_lidar_connect_.load()) {
         is_lidar_connect_ = is_connected;
-        status_changed_flag_ = true; 
-        
+        status_changed_flag_ = true;
+
         if (!is_connected) {
             ROS_ERROR("[LidarSub] LiDAR timeout. Clearing buffers.");
-            
+
             // 清空原始数据队列
             {
                 std::lock_guard<std::mutex> lock(raw_mutex_);
@@ -152,11 +173,23 @@ void LidarSub::timerCallback(const ros::TimerEvent&) {
             }
             // 通知后台线程清空滑动窗口
             need_reset_window_ = true;
-            raw_cv_.notify_one(); 
-            
+            raw_cv_.notify_one();
+
         } else {
             ROS_INFO("[LidarSub] LiDAR connection recovered.");
         }
+
+        // 边沿已经打印过，刷新限流时间戳，避免紧接着再补一条周期告警
+        last_warn_time_ = now;
+    }
+
+    // 持续断连期间每 15 s 再提醒一次：只在边沿打印一条时，运行中长时间断线
+    // 容易被后续日志淹没，也不便于判断断线已经持续了多久。
+    if (!is_connected &&
+        (now - last_warn_time_).toSec() >= DISCONNECT_WARN_INTERVAL_SEC) {
+        ROS_WARN("[LidarSub] No point cloud on %s for %.1f s (timeout %.1f s).",
+                 topic_name_.c_str(), (now - last_time).toSec(), timeout_sec_);
+        last_warn_time_ = now;
     }
 }
 
