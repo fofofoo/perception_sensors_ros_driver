@@ -221,8 +221,13 @@ bool BagRecorderNode::startCallback(std_srvs::Trigger::Request& req,
         execvp("rosbag", args.data());
 
         // execvp() 成功时不会返回：当前进程已经被 rosbag record 替换，
-        // 这行之后的代码都不存在了。只有失败（找不到 rosbag 或参数非法）才会走到这里。此时还没有 bag 文件落盘，无需清理。
-        // 必须用 _exit() 而不是 return 或 exit()，避免调用 C++ 静态对象析构函数，破坏父进程的 ROS 运行环境。
+        // 这行之后的代码都不存在了。只有失败（找不到 rosbag 或参数非法）
+        // 才会走到这里；此时还没有 bag 文件落盘，无需清理。
+        // 必须用 _exit() 而不是 return 或 exit()：
+        //   - return 会回到 main() 继续 ros::spin()，让子进程变成第二个 ROS 节点；
+        //   - exit() 会执行从父进程复制来的静态对象析构和 atexit 回调（如 rosconsole），
+        //     并刷新继承的 stdio 缓冲区，可能造成重复输出；
+        //   - 这些操作只影响子进程自己的地址空间，不会破坏父进程，但没有必要执行。
         ROS_ERROR("[BagRecorder] Child process execvp rosbag failed!");
         _exit(1);
     } else {
