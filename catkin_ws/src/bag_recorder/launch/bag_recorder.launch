@@ -14,10 +14,16 @@
     <arg name="max_bag_size_gb" default="25.0" doc="单次录制总大小上限（GB）"/>
     <!-- 达到总上限后的动作：stop=停止录制；delete_old=删除最旧分卷后继续录制 -->
     <arg name="total_limit_action" default="stop" doc="超过总上限时的动作：stop / delete_old"/>
+    <!-- 目录级清理：save_dir 下所有批次 bag 的总大小高水位（GB）；<= 0 关闭清理，只发布大小 -->
+    <arg name="max_dir_size_gb" default="150.0" doc="保存目录所有批次的总大小高水位（GB）"/>
+    <!-- 目录级清理低水位（GB）：进入清理后删到这里才停止；默认比高水位低 20 GB（2 个单卷） -->
+    <arg name="dir_low_watermark_gb" default="130.0" doc="目录清理目标低水位（GB）"/>
 
     <param name="save_dir" value="$(arg save_dir)"/>
     <param name="max_bag_size_gb" value="$(arg max_bag_size_gb)"/>
     <param name="total_limit_action" value="$(arg total_limit_action)"/>
+    <param name="max_dir_size_gb" value="$(arg max_dir_size_gb)"/>
+    <param name="dir_low_watermark_gb" value="$(arg dir_low_watermark_gb)"/>
 
     <!--
       录制话题列表，与源码默认值保持一致。

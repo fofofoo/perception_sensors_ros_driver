@@ -72,6 +72,7 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 | `/perception_sensors/uwb_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；`true` 在线，`false` 串口异常或 15 s 无有效帧 |
 | `/perception_sensors/recording_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched，录制中为 `true` |
 | `/perception_sensors/recording_size` | `std_msgs/Float64` | 发布 | 录制中 1 Hz + 停止时一次 | 当前批次现存分卷总大小（GB，GiB）；`delete_old` 后数值会下降 |
+| `/perception_sensors/recording_dir_size` | `std_msgs/Float64` | 发布 | 录制中 1 Hz + 开录前一次 | 保存目录所有批次的总大小（GB，GiB），含 `.bag.active`；目录级清理的依据 |
 | `/chassis_msg` | `common_msgs/ChassisMsg` | 订阅 | 由底盘决定 | `chassis_relay_ctrl.tops_power_enable == 1` 开始保存，其余值停止保存；超过 5 s 无消息自动停录；消息定义见 `catkin_ws/src/common_msgs/` |
 | `/perception_sensors/start_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 开始录制；重复调用返回 `Already recording!` |
 | `/perception_sensors/stop_bag_recorder` | `std_srvs/Trigger` | 服务 | 事件 | 停止录制；未录制时返回 `Not recording!` |
@@ -138,6 +139,13 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
 - **录制大小**：`/perception_sensors/recording_size` 单位 GB（GiB，1024³ 字节），
   统计当前批次现存分卷（含正在写入的 `.bag.active`）；`delete_old` 删除旧卷后数值会下降，
   反映的是磁盘占用而不是本次累计写入量。开始录制时发 0，停止时发一次最终值。
+- **录制目录总量**：`/perception_sensors/recording_dir_size` 统计保存目录下**所有批次**的
+  `perception_sensors_*.bag`（含 `.bag.active`），是目录级清理的依据。录制期间 1 Hz 发布，
+  开录前预清理后也发一次；目录清理删除文件后数值会下降。
+- **目录级清理**：`max_dir_size_gb`（默认 150 GB）是目录高水位，`dir_low_watermark_gb`
+  （默认 130 GB）是低水位。总量达到高水位后按「批次序号 → 分卷号」从旧到新删除已关闭分卷，
+  删到低水位才停；`.bag.active` 永远不删。优先删历史批次，历史批次删完仍超限才删当前批次的
+  旧分卷。开录前会先做一次预清理；停止录制后不清理。
 
 ## 频率链
 
@@ -185,6 +193,8 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 | `save_dir` | 空 | 空表示仓库根目录的 `log/rosbag`，目录不存在时自动创建 |
 | `max_bag_size_gb` | `25.0` | 单次录制总大小上限（GB）；单卷固定 10 GB，源码硬编码 |
 | `total_limit_action` | `stop` | 达到总上限时：`stop` 停止录制；`delete_old` 删除最旧分卷后继续 |
+| `max_dir_size_gb` | `150.0` | 保存目录所有批次的总大小高水位（GB）；`<= 0` 关闭目录级清理 |
+| `dir_low_watermark_gb` | `130.0` | 目录清理目标低水位（GB），须小于高水位；非法时回退为「高水位 − 2 个单卷」 |
 
 UWB 串口名在 `uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置；雷达网络参数在
 `rslidar_sdk-v1.5.20/config/config.yaml` 中配置。
@@ -213,6 +223,7 @@ rostopic echo /perception_sensors/uwb_position
 rostopic echo -n1 /perception_sensors/uwb_status
 rostopic echo -n1 /perception_sensors/recording_status
 rostopic echo /perception_sensors/recording_size
+rostopic echo /perception_sensors/recording_dir_size
 ```
 
 ## 已知陷阱
@@ -221,6 +232,7 @@ rostopic echo /perception_sensors/recording_size
    同时确认雷达网页里的点云目的地址是 `192.168.1.100`。
 2. **单卷固定 10 GB，`max_bag_size_gb=25` 是单次录制总上限**：达到上限时 `stop`（默认）停录，
    `delete_old` 按整卷删除最旧分卷后继续（占用在 15~25 GB 波动）；首个分卷文件名带 `_0` 后缀。
+   它与 `max_dir_size_gb`（目录所有批次的总上限）是两套独立限制，互不替代。
 3. **保存目录默认在仓库根目录的 `log/rosbag`**：按 `bag_recorder` 包路径
    `../../../log/rosbag` 推导；现场长期运行建议用 `save_dir` 指到数据盘。
 4. **录制开关取自 `/chassis_msg` 的 `chassis_relay_ctrl.tops_power_enable`**：只有 `1` 算打开，
@@ -237,3 +249,8 @@ rostopic echo /perception_sensors/recording_size
 7. **裸的 `ERRCODE_MSOPTIMEOUT` 来自激光雷达驱动**：`rs_driver` 用 `std::cout` 直接打印、
    绕过 ROS 日志，所以没有 `[WARN]` 前缀和节点名。它是 MSOP 收包超过 1 s 的提示，零星出现可忽略；
    连续每秒刷说明雷达没在发包或主机收不到，按陷阱 1 检查网络与点云目的地址。
+8. **目录级清理只删已关闭分卷，且停止录制后不清理**：`.bag.active` 永远保留，所以当历史批次
+   全删完仍超限时，会继续删当前批次的旧分卷（保留正在写入的那一卷）；只剩 `.active` 时无法
+   再降，节点按 1 s 限流告警。停止录制后不做清理，刚录完的批次至少保留到下一次开始录制。
+   如果现场要求连续录制并完全依赖目录循环覆盖，需把 `total_limit_action` 改为 `delete_old`
+   或调大 `max_bag_size_gb`，否则默认的「单次 25 GB + stop」会先把录制停掉。

@@ -46,6 +46,13 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 `save_dir` 留空时使用仓库根目录的 `log/rosbag`。UWB 串口名在
 `uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置。
 
+录制参数原样透传给 `bag_recorder`：
+
+- `max_bag_size_gb` / `total_limit_action`：单次录制的总上限与超限动作；
+- `max_dir_size_gb` / `dir_low_watermark_gb`：保存目录所有批次的高/低水位（默认 150/130 GB），
+  达到高水位后按最旧批次删除已关闭分卷，删到低水位停止；`.bag.active` 永不删除；
+- `max_dir_size_gb <= 0` 关闭目录级清理，仅发布目录总量。
+
 ## 行为说明
 
 - 第一帧消息无论上装电源是开还是关都会执行一次服务调用，用于让录制状态与底盘同步。

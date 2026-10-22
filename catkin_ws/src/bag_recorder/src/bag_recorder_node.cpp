@@ -6,6 +6,8 @@
  *   - 提供 start / stop 两个 Trigger 服务，fork 子进程执行 rosbag record；
  *   - 录制期间发布 latched 的 recording_status，供素材发布端做互斥；
  *   - 录制期间每秒发布当前批次已录文件总大小（GB），停止时发布一次最终值；
+ *   - 目录级清理：按 save_dir 下所有批次 bag 的总大小做高低水位循环覆盖，
+ *     防止多次录制累积把磁盘占满；
  *   - 负责生成唯一、可排序的 bag 文件名，并保证不会覆盖已有文件。
  *
  * 文件名规则：
@@ -135,8 +137,9 @@ private:
     ros::NodeHandle nh_;
     ros::ServiceServer start_srv_;
     ros::ServiceServer stop_srv_;
-    ros::Publisher record_status_pub_;   // 录制状态广播（素材保存互斥信号源）
-    ros::Publisher recording_size_pub_;  // 当前批次已录文件总大小（GB，std_msgs/Float64）
+    ros::Publisher record_status_pub_;        // 录制状态广播（素材保存互斥信号源）
+    ros::Publisher recording_size_pub_;       // 当前批次已录文件总大小（GB，std_msgs/Float64）
+    ros::Publisher recording_dir_size_pub_;   // 保存目录所有批次总大小（GB，std_msgs/Float64）
 
     std::atomic<pid_t> record_pid_{-1};
     std::atomic<bool> is_recording_{false};
@@ -146,11 +149,15 @@ private:
     std::string save_dir_;              // 保存目录；空表示按 bag_recorder 包路径推导
     double max_bag_size_gb_ = 25.0;     // 单次录制总大小上限（GB）
     std::string total_limit_action_ = "stop";  // 达到总上限后的动作：stop / delete_old
+    double max_dir_size_gb_ = 150.0;    // 保存目录所有批次的高水位（GB，GiB 口径）；<= 0 关闭
+    double dir_low_watermark_gb_ = 130.0;  // 清理目标低水位（GB）：进入清理后删到这里才停
 
     // —— 当前录制批次 ——
     std::string current_bag_prefix_;    // 当前批次的 bag 前缀（不含 _N.bag）
-    ros::Timer total_size_timer_;       // 录制期间定时检查总大小
+    ros::Timer total_size_timer_;       // 录制期间定时检查单次与目录总大小
     bool limit_warning_shown_ = false;  // delete_old 无法删除时避免每秒刷日志
+    bool dir_cleanup_active_ = false;   // 已进入目录清理，未降到低水位前持续删除
+    bool dir_limit_warning_shown_ = false;  // 目录超限但无可删文件时避免每秒刷日志
 
     // 当前批次的一个分卷文件。
     struct SplitFile {
@@ -158,6 +165,16 @@ private:
         unsigned long index = 0;   // rosbag 追加的分卷号
         bool active = false;       // true 表示 .bag.active，正在写入
         uintmax_t size = 0;        // 字节数
+    };
+
+    // 保存目录下的一个 bag 分卷（跨批次），供目录级清理使用。
+    // 与 SplitFile 的区别是带 batch_seq：清理时要先删最旧批次。
+    struct DirBagFile {
+        fs::path path;
+        uint32_t batch_seq = 0;        // 文件名中的 6 位批次序号（录制次数）
+        unsigned long split_index = 0; // rosbag 追加的分卷号
+        bool active = false;           // true 表示 .bag.active，正在写入
+        uintmax_t size = 0;            // 字节数
     };
 
     // —— 文件名序号状态 ——
@@ -194,6 +211,11 @@ public:
         // 录制期间由总大小定时器每秒发布；开始录制发 0，停止时发一次最终值。
         // 与状态话题不同，不 latch，避免新订阅者误以为录制仍在进行。
         recording_size_pub_ = nh_.advertise<std_msgs::Float64>("/perception_sensors/recording_size", 5);
+        // 保存目录所有批次的总大小，单位 GB（GiB，1024³ 字节）。
+        // 录制期间由总大小定时器每秒发布，开录前预清理后也发一次；
+        // 与 recording_size 的区别是它统计整个 save_dir，是目录级清理的依据。
+        recording_dir_size_pub_ = nh_.advertise<std_msgs::Float64>(
+            "/perception_sensors/recording_dir_size", 5);
 
         // 总大小检查定时器：rosbag 没有总大小上限参数，录制期间由节点统计
         // 当前批次所有分卷（含正在写入的 .active）的总字节数。
@@ -235,6 +257,11 @@ public:
             sequence_scanned_ = true;
             scanned_dir_ = target_dir;
         }
+
+        // 开录前按目录总量做一次预清理：历史批次若已把目录撑到高水位以上，
+        // 先删最旧批次，避免本次录制一开始就超额。此时 current_bag_prefix_
+        // 为空，所有历史文件都按「非当前批次」处理；.bag.active 仍然跳过。
+        enforceDirLimit(target_dir, true);
 
         // 3. 生成唯一文件名：序号 + 时间戳。rosbag 的 -O 在目标已存在时会
         //    直接覆盖（实测），所以先检查 <前缀>.bag 与首个分卷 <前缀>_0.bag。
@@ -385,6 +412,8 @@ private:
         nh_.param<std::string>("save_dir", save_dir_, "");
         nh_.param<double>("max_bag_size_gb", max_bag_size_gb_, 25.0);
         nh_.param<std::string>("total_limit_action", total_limit_action_, "stop");
+        nh_.param<double>("max_dir_size_gb", max_dir_size_gb_, 150.0);
+        nh_.param<double>("dir_low_watermark_gb", dir_low_watermark_gb_, 130.0);
 
         // 参数兜底：非法值直接回退到默认值，避免把 rosbag 参数传成 0 或负数。
         if (max_bag_size_gb_ <= 0.0) {
@@ -399,6 +428,26 @@ private:
             total_limit_action_ = "stop";
         }
 
+        // 目录级清理参数校验：
+        // - max_dir_size_gb_ <= 0 表示关闭清理，只统计和发布目录总量；
+        // - 低水位必须落在 (0, 高水位) 之间。非法时回退到「高水位 - 2 个单卷」，
+        //   保证一次清理至少能删掉两卷，避免高低水位过近导致每秒都触发删除；
+        //   若高水位本身不足两个单卷，则退化为高水位的一半。
+        if (max_dir_size_gb_ <= 0.0) {
+            ROS_WARN("[BagRecorder] max_dir_size_gb=%.3f <= 0，关闭目录级清理，"
+                     "仅发布目录总量。", max_dir_size_gb_);
+        } else if (dir_low_watermark_gb_ <= 0.0 ||
+                   dir_low_watermark_gb_ >= max_dir_size_gb_) {
+            const double volume_gb = kSplitSizeMb / 1024.0;
+            const double fallback = max_dir_size_gb_ - 2.0 * volume_gb;
+            const double old_low = dir_low_watermark_gb_;
+            dir_low_watermark_gb_ =
+                (fallback > 0.0) ? fallback : max_dir_size_gb_ / 2.0;
+            ROS_WARN("[BagRecorder] dir_low_watermark_gb=%.3f 非法（须在 0 与高水位 "
+                     "%.3f 之间），回退到 %.3f GB。",
+                     old_low, max_dir_size_gb_, dir_low_watermark_gb_);
+        }
+
         ROS_INFO("[BagRecorder] 录制话题（%zu 个）：", topics_.size());
         for (const auto& topic : topics_) {
             ROS_INFO("  - %s", topic.c_str());
@@ -408,6 +457,9 @@ private:
                  max_bag_size_gb_,
                  kSplitSizeMb / 1024.0,
                  total_limit_action_.c_str());
+        ROS_INFO("[BagRecorder] 目录级清理：高水位 %.3f GB，低水位 %.3f GB%s。",
+                 max_dir_size_gb_, dir_low_watermark_gb_,
+                 max_dir_size_gb_ <= 0.0 ? "（已关闭）" : "");
 
         // 单卷固定 10 GB。delete_old 只能删除已经关闭的旧分卷，如果总上限
         // 比单卷还小，第一卷一写完就已经超限，此时没有旧卷可删。
@@ -566,6 +618,185 @@ private:
         recording_size_pub_.publish(msg);
     }
 
+    // 发布保存目录所有批次的总大小（std_msgs/Float64，单位 GB）。
+    // 录制期间每秒调用；开录前预清理后也发一次。不 latch。
+    void publishDirSize(uintmax_t bytes) {
+        std_msgs::Float64 msg;
+        msg.data = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+        recording_dir_size_pub_.publish(msg);
+    }
+
+    // 扫描保存目录下所有由本节点命名的 bag 分卷（含正在写入的 .bag.active），
+    // 按「批次序号 → 分卷号」升序返回，供目录级清理从旧到新删除。
+    // 只认 perception_sensors_<6 位序号>_<YYYYmmdd_HHMMSS>_<分卷号>.bag 格式；
+    // 目录里手动录制的其它 bag、临时文件既不统计也不删除。
+    std::vector<DirBagFile> scanDirBags(const std::string& dir) const {
+        std::vector<DirBagFile> files;
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) {
+            return files;
+        }
+
+        const std::regex pattern(
+            std::string("^") + kBagPrefix + "(\\d{" + std::to_string(kBagSeqWidth) +
+            "})_\\d{8}_\\d{6}_(\\d+)\\.bag(\\.active)?$");
+
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (ec) {
+                break;
+            }
+            std::error_code entry_ec;
+            if (!entry.is_regular_file(entry_ec) || entry_ec) {
+                continue;
+            }
+
+            const std::string name = entry.path().filename().string();
+            std::smatch match;
+            if (!std::regex_match(name, match, pattern)) {
+                continue;
+            }
+
+            DirBagFile file;
+            try {
+                file.batch_seq = static_cast<uint32_t>(std::stoul(match[1].str()));
+                file.split_index = std::stoul(match[2].str());
+            } catch (const std::exception&) {
+                continue;
+            }
+            file.active = match[3].matched;
+
+            std::error_code size_ec;
+            file.size = fs::file_size(entry.path(), size_ec);
+            if (size_ec) {
+                continue;
+            }
+            file.path = entry.path();
+            files.push_back(std::move(file));
+        }
+
+        std::sort(files.begin(), files.end(),
+                  [](const DirBagFile& a, const DirBagFile& b) {
+                      if (a.batch_seq != b.batch_seq) {
+                          return a.batch_seq < b.batch_seq;
+                      }
+                      return a.split_index < b.split_index;
+                  });
+        return files;
+    }
+
+    // 从当前批次前缀解析文件名里的 6 位批次序号；未录制时返回 0。
+    // 只用于目录级清理区分「当前正在录的批次」和「历史批次」；
+    // 前缀由 allocateBagPath() 生成，格式固定，解析失败只可能是内存状态异常。
+    uint32_t currentBatchSeq() const {
+        if (current_bag_prefix_.empty()) {
+            return 0;
+        }
+        const std::string name = fs::path(current_bag_prefix_).filename().string();
+        const std::regex pattern(std::string("^") + kBagPrefix + "(\\d{" +
+                                 std::to_string(kBagSeqWidth) + "})_");
+        std::smatch match;
+        if (!std::regex_search(name, match, pattern)) {
+            return 0;
+        }
+        try {
+            return static_cast<uint32_t>(std::stoul(match[1].str()));
+        } catch (const std::exception&) {
+            return 0;
+        }
+    }
+
+    // 目录级清理：把 save_dir 下所有本节点 bag 的总大小压到低水位。
+    // 采用高低水位状态机：未激活时总量达到 max_dir_size_gb_ 才进入清理，
+    // 进入后必须删到 dir_low_watermark_gb_ 才复位，避免每秒只删一卷。
+    // 删除顺序：先删非当前批次，仍超限再删当前批次的旧分卷；两轮都跳过
+    // .bag.active（正在写入，删除后空间也不会释放）。max_dir_size_gb_ <= 0
+    // 时只统计和发布大小，不删除。返回本次删除的文件数。
+    int enforceDirLimit(const std::string& dir, bool publish_size) {
+        const double bytes_per_gb = 1024.0 * 1024.0 * 1024.0;
+        const std::vector<DirBagFile> files = scanDirBags(dir);
+
+        uintmax_t total = 0;
+        for (const auto& file : files) {
+            total += file.size;
+        }
+
+        // 清理关闭时只保留统计，不做任何删除。
+        if (max_dir_size_gb_ <= 0.0) {
+            if (publish_size) {
+                publishDirSize(total);
+            }
+            return 0;
+        }
+
+        const uintmax_t high_bytes =
+            static_cast<uintmax_t>(max_dir_size_gb_ * bytes_per_gb);
+        const uintmax_t low_bytes =
+            static_cast<uintmax_t>(dir_low_watermark_gb_ * bytes_per_gb);
+
+        // 未进入清理态且没到高水位：保持现状。
+        if (!dir_cleanup_active_ && total < high_bytes) {
+            if (publish_size) {
+                publishDirSize(total);
+            }
+            return 0;
+        }
+        dir_cleanup_active_ = true;
+
+        const uint32_t current_seq = currentBatchSeq();
+        int deleted = 0;
+
+        // 两轮删除：第 0 轮只删历史批次，第 1 轮才允许删当前批次的旧卷。
+        // 这样当前录制尽量保留，只有历史批次全删完仍超限时才动它。
+        // files 已按批次序号和分卷号升序，从旧到新删。
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const auto& file : files) {
+                if (total <= low_bytes) {
+                    break;
+                }
+                if (file.active) {
+                    continue;  // 正在写入的文件永远不删
+                }
+                const bool is_current = (file.batch_seq == current_seq);
+                if (is_current != (pass == 1)) {
+                    continue;
+                }
+
+                std::error_code ec;
+                if (!fs::remove(file.path, ec) || ec) {
+                    ROS_WARN("[BagRecorder] 目录清理删除失败：%s（%s）",
+                             file.path.c_str(), ec.message().c_str());
+                    continue;
+                }
+
+                total -= file.size;
+                ++deleted;
+                ROS_INFO("[BagRecorder] 目录总量超过高水位，删除最旧分卷：%s（%.3f GB）",
+                         file.path.c_str(),
+                         static_cast<double>(file.size) / bytes_per_gb);
+            }
+        }
+
+        // 删除后统一刷新一次，保证每次检查最多发布一条目录大小。
+        if (publish_size) {
+            publishDirSize(total);
+        }
+
+        if (total <= low_bytes) {
+            dir_cleanup_active_ = false;
+            dir_limit_warning_shown_ = false;
+            ROS_INFO("[BagRecorder] 目录清理完成，当前总量 %.3f GB（低水位 %.3f GB）。",
+                     static_cast<double>(total) / bytes_per_gb,
+                     dir_low_watermark_gb_);
+        } else if (!dir_limit_warning_shown_) {
+            // 只剩 active（或删除失败）时无法再降，限流告警，避免每秒刷屏。
+            ROS_WARN("[BagRecorder] 目录总量 %.3f GB 仍高于高水位 %.3f GB，但已没有"
+                     "可删除的已关闭分卷（只剩正在写入的 .bag.active 或残留文件）。",
+                     static_cast<double>(total) / bytes_per_gb, max_dir_size_gb_);
+            dir_limit_warning_shown_ = true;
+        }
+        return deleted;
+    }
+
     // 删除当前批次最旧的已关闭分卷，直到总大小不超过 cap_bytes。
     // 正在写入的 .bag.active 永远不删，避免破坏 rosbag 的输出文件。
     // 返回实际删除的分卷数量。
@@ -608,6 +839,11 @@ private:
         if (!is_recording_.load() || current_bag_prefix_.empty()) {
             return;
         }
+
+        // 先做目录级清理：它可能删掉当前批次的旧分卷，之后再统计单次大小，
+        // 保证两个上限基于同一时刻的目录状态。目录大小话题也在这里发布。
+        const std::string dir = fs::path(current_bag_prefix_).parent_path().string();
+        enforceDirLimit(dir, true);
 
         const double bytes_per_gb = 1024.0 * 1024.0 * 1024.0;
         const uintmax_t cap_bytes =

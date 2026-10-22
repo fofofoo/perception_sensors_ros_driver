@@ -15,6 +15,8 @@
     <arg name="save_dir" default="" doc="bag 保存目录；留空表示仓库根目录的 log/rosbag"/>
     <arg name="max_bag_size_gb" default="25.0" doc="单次录制总大小上限（GB）"/>
     <arg name="total_limit_action" default="stop" doc="超过总上限时的动作：stop / delete_old"/>
+    <arg name="max_dir_size_gb" default="150.0" doc="保存目录所有批次总大小高水位（GB）"/>
+    <arg name="dir_low_watermark_gb" default="130.0" doc="目录清理目标低水位（GB）"/>
 
     <!-- UWB 串口名在 uwb_rtu_serial_demo/launch/uwb_node.launch 内配置 -->
 
@@ -34,6 +36,8 @@
         <arg name="save_dir" value="$(arg save_dir)"/>
         <arg name="max_bag_size_gb" value="$(arg max_bag_size_gb)"/>
         <arg name="total_limit_action" value="$(arg total_limit_action)"/>
+        <arg name="max_dir_size_gb" value="$(arg max_dir_size_gb)"/>
+        <arg name="dir_low_watermark_gb" value="$(arg dir_low_watermark_gb)"/>
     </include>
 
     <!-- ================= 5. 上装电源联动 ================= -->
