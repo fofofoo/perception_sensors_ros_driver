@@ -12,7 +12,7 @@
 | [lidar_preprocess](catkin_ws/src/lidar_preprocess/) | 点云滑动窗口多帧累加与雷达心跳 | `lidar_preprocess.cpp` |
 | [ultrasonic_radar_modbus_tcp](catkin_ws/src/ultrasonic_radar_modbus_tcp/) | Modbus TCP 网关采集两组各 4 路超声波 | `src/main.cpp` |
 | [uwb_rtu_serial_demo](catkin_ws/src/uwb_rtu_serial_demo/) | Modbus-RTU 串口解析 UWB 定位帧 | `src/main.cpp` |
-| [bag_recorder](catkin_ws/src/bag_recorder/) | 服务控制的 rosbag 录制/停止 | `src/bag_recorder_node.cpp` |
+| [bag_recorder](catkin_ws/src/bag_recorder/) | 服务控制的 rosbag 录制/停止 | `src/main.cpp` |
 | [common_msgs](catkin_ws/src/common_msgs/) | 底盘控制消息定义（`ChassisMsg` / `ChassisCtrl` / `TopMsg`） | `msg/ChassisMsg.msg` |
 | [perception_sensors_client_main](catkin_ws/src/perception_sensors_client_main/) | 顶层 launch 一键启动；底盘上装电源联动录制 | `src/main.cpp` |
 
@@ -56,7 +56,9 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   [uwb_rtu_serial_demo/README.md](catkin_ws/src/uwb_rtu_serial_demo/README.md#掉线重连方案)。
 - 录制：服务事件驱动；联动节点只负责把底盘上装电源使能（`tops_power_enable`）翻译成
   start/stop 服务调用。另设 5 s 断流保护：底盘停止发布 `/chassis_msg` 时自动停录，
-  避免持续录制无控制键的数据。
+  避免持续录制无控制键的数据。`bag_recorder` 自身拆为 `src/main.cpp`（参数、发布器、
+  服务、定时器与 `ros::spin()`）和 `include/bag_recorder/bag_recorder_node.h` +
+  `src/bag_recorder_node.cpp`（录制、统计、清理流水线），ROS 拓扑只在 main 中可见。
 
 ## 话题与服务契约
 

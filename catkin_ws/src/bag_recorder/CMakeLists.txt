@@ -35,7 +35,11 @@ include_directories(
 )
 
 ## 声明可执行文件
-add_executable(${PROJECT_NAME}_node src/bag_recorder_node.cpp)
+## main.cpp：参数读取与 ROS 拓扑；bag_recorder_node.cpp：录制业务流水线
+add_executable(${PROJECT_NAME}_node
+  src/main.cpp
+  src/bag_recorder_node.cpp
+)
 
 ## 添加依赖（确保消息等生成后再编译）
 add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
