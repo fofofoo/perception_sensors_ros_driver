@@ -111,7 +111,7 @@ ultrasonic_radar_data[] radars
 | `timeout` | `0.5` | 连接和应答超时，秒 |
 | `reconnect_interval` | `1.0` | 已上线服务器断线后的重连间隔，秒 |
 | `reprobe_interval` | `30.0` | 启动探测失败服务器的后台重探间隔，秒；`0` 关闭周期重探（恢复永久跳过） |
-| `print_data` | `true` | 每轮打印 4 路原始 mm 值和换算距离 |
+| `print_data` | `false` | 每轮打印 4 路原始 mm 值和换算距离；部署时关闭，排查时改 `true` |
 | `debug_frames` | `false` | 打印 Modbus TCP 收发字节 |
 
 话题名、从机地址（1）、1 号探头寄存器（`0x0106`）、读取数量（4）

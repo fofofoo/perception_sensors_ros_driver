@@ -14,7 +14,7 @@
      | --- | --- |
      | Airy360 | 官方驱动 UDP 收包；滑动窗口多帧累加后 10 Hz 发布 |
      | 超声波雷达 | 两组 M04 网关各 4 路，0.3 s 轮询，按轮聚合成一条消息 |
-     | UWB | 默认旁路订阅旧节点话题并转发；顶层一键启动时主动采集串口，字节流分帧 + CRC16，收一帧发一帧 |
+     | UWB | 默认旁路订阅旧节点话题并转发；`uwb_self_collect:=true` 时主动采集串口，字节流分帧 + CRC16，收一帧发一帧 |
 
    - 每类设备都有 latched 的链路状态话题（激光雷达 1 个、超声波每台网关 1 个、UWB 1 个），
      只在 `true`/`false` 跳变时发布，后启动的订阅者也能立即拿到当前状态；
@@ -83,8 +83,8 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   启动时读不到数据的网关先跳过，由后台线程每 30 s 重探，接好模组后自动上线。
   掉线重连细节与拔线测试步骤见
   [ultrasonic_radar_modbus_tcp/README.md](catkin_ws/src/ultrasonic_radar_modbus_tcp/README.md#掉线重连方案)。
-- UWB：顶层一键启动和手动 `uwb_self_collect:=true` 时串口主动轮询，收一帧发一帧；启动时打不开
-  串口不退出，每 5 s 重试；运行中读写异常或 30 s 无有效帧时按 10 s 节流自动重连，插回 USB-TTL
+- UWB：手动 `uwb_self_collect:=true` 时串口主动轮询，收一帧发一帧；启动时打不开
+  串口不退出，每 5 s 重试；运行中读写异常或 300 s 无有效帧时按 10 s 节流自动重连，插回 USB-TTL
   后无需重启节点。默认旁路模式不打开串口，只订阅旧 `serial_demo` 的 `/uwb_position` 并原样转发到
   `/perception_sensors/uwb_position`，不参与重连。判定细节、三种重连落点对比与拔串口测试步骤见
   [uwb_rtu_serial_demo/README.md](catkin_ws/src/uwb_rtu_serial_demo/README.md#掉线重连方案)。
@@ -258,17 +258,17 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 | 超声波 | `timeout` | 0.5 s | launch | TCP 连接与单次应答超时 |
 | 超声波 | `reconnect_interval` | 1.0 s | launch | 已上线服务器断线后的重连间隔 |
 | 超声波 | `reprobe_interval` | 30.0 s | launch | 启动探测失败端口的后台重探间隔；`0` 关闭 |
-| UWB | `uwb_self_collect` | `false`（顶层 launch 显式传 `true`） | launch | 运行模式：`false` 旁路订阅外部话题，`true` 主动采集串口 |
+| UWB | `uwb_self_collect` | `false`（顶层 launch 也显式传 `false`） | launch | 运行模式：`false` 旁路订阅外部话题，`true` 主动采集串口 |
 | UWB | `uwb_source_topic` | `/uwb_position` | launch | 旁路模式订阅的来源话题；不能等于转发目标 |
 | UWB | `uwb_heartbeat_timeout_ms` | 15 s | launch | 无有效帧多久告警、状态话题置 `false`；两种模式都用 |
-| UWB | `uwb_link_fail_timeout_ms` | 30 s | launch | 连续无有效帧多久触发重连；仅主动采集模式 |
+| UWB | `uwb_link_fail_timeout_ms` | 300 s | launch | 连续无有效帧多久触发重连；仅主动采集模式 |
 | UWB | `uwb_startup_retry_sec` | 5 s | launch | 启动打不开串口时的重试间隔；仅主动采集模式 |
 | UWB | `uwb_runtime_reconnect_sec` | 10 s | launch | 运行中失联后的重连间隔；仅主动采集模式 |
 
 几点语义：
 
 - 状态话题频率只反映跳变次数，**不能拿 `rostopic hz` 判断设备在线**；后启动的订阅者靠 latched 拿当前值。
-- UWB 的状态阈值（15 s）小于重连阈值（30 s）：下游先知道数据失效，节点随后才重连。
+- UWB 的状态阈值（15 s）小于重连阈值（launch 默认 300 s）：下游先知道数据失效，节点随后才重连。
 - 超声波某一路 `false` 不代表节点故障：503 未接模组时它一直是 `false`，502 照常轮询。
 - 激光雷达在收到第一帧之前不做超时判定，也不会发布状态消息；从未收到数据的场景要看点云话题是否更新。
 - 激光雷达的重连交给 `rslidar_sdk` 内置处理，本仓库不写重连逻辑；`lidar_preprocess` 只做
@@ -351,8 +351,8 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 
 顶层 launch 依次 include：`lidar_preprocess` → `ultrasonic_radar_modbus_tcp` → `uwb_rtu_serial_demo`
 → `bag_recorder`，最后启动上装电源联动节点。其中 UWB 的 include 显式传
-`uwb_self_collect:=true`，因此一键启动仍是主动采集；单独
-`roslaunch uwb_rtu_serial_demo uwb_node.launch` 默认是旁路订阅。
+`uwb_self_collect:=false`，一键启动保持旁路订阅（依赖旧 `serial_demo` 节点发布 `/uwb_position`）；
+需要串口主动采集时把该 include 改成 `true`，并先停掉旧节点避免串口被占。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -442,10 +442,13 @@ rosservice call /perception_sensors/stop_bag_recorder
 | rviz | 激光雷达点云，`lidar_preprocess.rviz`（Fixed Frame = `rslidar`，显示累加结果） |
 | 超声波数据 | `rostopic echo /perception_sensors/ultrasonic_radar_datas` |
 | UWB 数据 | `rostopic echo /perception_sensors/uwb_position` |
-| 存储与链路状态 | 每 1~2 s 刷新：录制状态、当前批次大小、保存目录总量、雷达 / UWB / 每台超声波网关链路 |
+| 存储与链路状态 | 约 1~3 s 刷新：录制状态、当前批次大小、保存目录总量、雷达 / UWB / 每台超声波网关链路 |
 
-- 状态面板用 `rostopic echo -n1` 逐项取当前值（latched 话题立即返回），2 s 无数据时显示
-  「无数据」，不会把面板卡住；大小话题在录制中 1 Hz 发布，可直接看到增长。
+- 状态面板启动时画一次固定模板（标签 + 分隔线），之后每轮只用 ANSI 光标定位覆盖数据项，
+  不再 `clear` 整屏，屏幕不会整块闪烁、也不会逐行重绘。
+- 所有话题用 `rostopic echo -n1` **并行**取值（各自 2 s 超时），整批取完后一次性写屏，
+  耗时取决于最慢的一个而不是逐个累加；latched 话题立即返回，大小话题在录制中 1 Hz 发布。
+  2 s 无数据时显示「无数据」，不会把面板卡住。
 - 想只看激光雷达原始单帧时，把脚本里的 `-d` 配置换成 `rslidar_sdk/rviz/rviz.rviz`
   （显示 `/rslidar_points`）。
 - `Ctrl+C` 收起 rviz；三个终端窗口各自独立，直接关窗口即可。只关心某一路时，也可以按
@@ -502,9 +505,9 @@ git archive --format=zip --prefix=perception_sensors_ros_driver/ \
 4. **录制开关取自 `/chassis_msg` 的 `chassis_relay_ctrl.tops_power_enable`**：只有 `1` 算打开，
    其余值按关闭处理；消息类型 `common_msgs/ChassisMsg` 定义在独立包 `catkin_ws/src/common_msgs/`。
    正在录制时超过 5 s 没收到 `/chassis_msg` 会自动停录，恢复且仍为 `1` 时自动续录。
-5. **UWB 的重连阈值必须大于标签静态休眠间隔（仅主动采集模式）**：15 s 无帧只告警，30 s 才自动重连；
-   标签静态休眠默认 10 s 发一包，若现场把静态间隔调到 30 s 以上，需同步调大
-   `uwb_link_fail_timeout_ms`，否则会周期性做无意义的重连。断线期间不发布、不补 0，
+5. **UWB 的重连阈值必须大于标签静态休眠间隔（仅主动采集模式）**：15 s 无帧只告警，300 s 才自动重连；
+   标签静态休眠默认 10 s 发一包，launch 默认已按现场长休眠放宽到 300 s；若现场静态间隔更长，
+   需同步调大 `uwb_link_fail_timeout_ms`，否则会周期性做无意义的重连。断线期间不发布、不补 0，
    下游需按超时判断数据失效。旁路订阅模式不打开串口、不重连，来源停发时只把状态话题置 `false`。
 6. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
    可能不存在，读取协议和排障信息可以，按路径找代码不行。文档里的旧话题名

@@ -20,7 +20,7 @@ D-PDOA-Node-B 基站经 **TTL UART（USB-TTL，默认 `/dev/ttyUWB`）** 输出
 **状态话题** `/perception_sensors/uwb_status`：判定用 `RtuClient::isAlive(15 s)`，已包含
 「串口未打开」「读写异常」「超时无有效帧」三种情况。阈值取无帧告警值
 （launch 参数 `uwb_heartbeat_timeout_ms`，默认 15 s），而不是失联重连阈值
-`uwb_link_fail_timeout_ms`（默认 30 s），让下游早 15 s 知道数据失效；串口刚打开时
+`uwb_link_fail_timeout_ms`（launch 默认 300 s），让下游比触发重连早 285 s 知道数据失效；串口刚打开时
 `last_frame_time` 被重置，有同样时长的宽限，不会因为还没收到帧
 就立刻报 `false`。节点首轮必发一次，之后只在 `true`/`false` 跳变时发布，latched 保留
 当前值。状态话题的发布频率反映跳变次数，不是数据频率，**不要用 `rostopic hz` 判断标签是否在工作**。
@@ -85,7 +85,7 @@ float32 distance
   才发一包，阈值过小会误报；标签休眠调大时必须同步调大该参数；
 - 串口打开失败：节点**不再退出**，打印 `ROS_ERROR` 后保持运行，由主循环每 **5 s**
   （`uwb_startup_retry_sec`）重试；单台设备掉线不应拖垮顶层 launch 里的其它传感器；
-- 运行中串口断开：自动重连，**不需要重启节点**；连续 **30 s**
+- 运行中串口断开：自动重连，**不需要重启节点**；连续 **300 s**
   （`uwb_link_fail_timeout_ms`）没有有效帧（或读写异常）触发重试，重连失败后每 **10 s**
   （`uwb_runtime_reconnect_sec`）再试，插回串口后自动恢复；
 - 30 Hz 外层轮询里只做轻量判断（`isAlive()`），真正的 `open()` 由启动/运行两档间隔
@@ -104,13 +104,13 @@ float32 distance
 | --- | --- |
 | 启动探测 | 打开 `uwb_serial_port` 指定的设备；成功则打印 `打开成功（115200 8N1）`，失败只打印 `ROS_ERROR`，节点继续运行 |
 | 启动失败 | 保持运行，首轮等 **5 s** 后重试，之后每 5 s 一次；期间不发布话题，不退出进程 |
-| 断线判据 | `RtuClient::isAlive(uwb_link_fail_timeout_ms)` 为假（默认 30 s）：串口未打开、读写抛异常（`link_error_`），或阈值内没有 CRC 校验通过的整帧 |
+| 断线判据 | `RtuClient::isAlive(uwb_link_fail_timeout_ms)` 为假（launch 默认 300 s）：串口未打开、读写抛异常（`link_error_`），或阈值内没有 CRC 校验通过的整帧 |
 | 读写异常 | `available()` / `read()` / `write()` / `close()` 都可能因 USB 拔出抛异常，客户端内部捕获并置 `link_error_`，不再解析断线前残留的半帧 |
 | 重连动作 | `main` 在 30 Hz 外层循环检测，按 `next_reconnect` 节流调用 `RtuClient::reconnect()`：启动阶段 5 s、运行阶段 10 s |
 | 重连内容 | 关闭旧句柄 → 清空 `rx_buf_` 与心跳窗口 → 用最近一次 `open()` 记录的 port / baudrate / timeout 重新打开；不回放旧帧 |
 | 断线期间输出 | `/perception_sensors/uwb_position` **不发布**、不补 0、不发空消息；15 s 无有效帧后 `/perception_sensors/uwb_status` 跳变为 `false`，下游应优先用它判断失效 |
 | 恢复判定 | `open()` 成功（串口重新打开且没有异常）；收到下一帧有效定位帧后立即恢复发布 |
-| 心跳告警 | 15 s 无帧只告警一次，不触发重连；30 s 才进入重连逻辑，避免标签静态休眠造成误重连 |
+| 心跳告警 | 15 s 无帧只告警一次，不触发重连；300 s（launch 默认）才进入重连逻辑，避免标签静态休眠造成误重连 |
 | 日志 | 启动失败、重连失败分别由 `open()` / `reconnect()` 打印具体原因；1 Hz 心跳块对“串口异常等待重连”做 10 s 限流 |
 
 ### 三种落点评估
@@ -136,11 +136,11 @@ float32 distance
 
 ### 拔串口测试方案
 
-用于验证启动失败重试、运行中自动重连和恢复，约 5 分钟：
+用于验证启动失败重试、运行中自动重连和恢复，约 6 分钟（重连阈值为 300 s）：
 
 1. **基线**：接好 USB-TTL 与基站，启动节点，确认 `rostopic hz /perception_sensors/uwb_position`
    有数据；
-2. **运行中拔出**：拔掉 USB-TTL，确认节点不退出；约 15 s 打印一次无帧告警，30 s 后日志出现
+2. **运行中拔出**：拔掉 USB-TTL，确认节点不退出；15 s 后打印无帧告警，300 s 后日志出现
    `尝试重连串口 ...`；
 3. **离线启动**：保持拔出状态重启节点，确认打印 `打开失败，节点保持运行，每 5 s 重试`，
    进程持续存活且不发布话题；
@@ -164,9 +164,9 @@ float32 distance
 | `uwb_self_collect` | `false` | 运行模式：`false`=旁路订阅外部话题（不占串口、不重连）；`true`=主动打开串口采集 |
 | `uwb_source_topic` | `/uwb_position` | 旁路模式订阅的来源话题；不能与转发目标 `/perception_sensors/uwb_position` 相同 |
 | `uwb_serial_port` | `/dev/ttyUWB` | 基站 TTL 转串口设备路径；无 udev 时改成 `/dev/ttyUSB0` 等；仅主动采集模式使用 |
-| `uwb_print_frame` | `true` | 是否逐帧打印定位结果；正式运行可设 `false` |
+| `uwb_print_frame` | `false` | 是否逐帧打印定位结果；正式运行关闭，排查时改成 `true` |
 | `uwb_heartbeat_timeout_ms` | `15000` | 无帧告警阈值，ms：无有效帧多久告警、状态话题置 `false`；需大于标签静态休眠间隔（默认 10 s），休眠调大时同步调大 |
-| `uwb_link_fail_timeout_ms` | `30000` | 连续无有效帧触发重连的阈值，ms；必须大于 `uwb_heartbeat_timeout_ms`，且大于标签静态休眠间隔 |
+| `uwb_link_fail_timeout_ms` | `300000` | 连续无有效帧触发重连的阈值，ms；必须大于 `uwb_heartbeat_timeout_ms`，且大于标签静态休眠间隔。按现场长休眠放宽到 300 s |
 | `uwb_startup_retry_sec` | `5.0` | 启动打不开串口时的重试间隔，秒 |
 | `uwb_runtime_reconnect_sec` | `10.0` | 运行中失联后的最小重连间隔，秒 |
 
@@ -336,7 +336,7 @@ rostopic echo -n1 /perception_sensors/uwb_status
 | CRC 错 / 垃圾字节 | 丢 1 字节重新找帧头 |
 | 非定位帧 | 丢弃，继续取下一帧 |
 | 15 s 无有效帧 | `ROS_WARN` 一次，恢复后复位告警；不触发重连 |
-| 30 s 无有效帧 | 进入重连逻辑，运行阶段每 10 s 重试一次 |
+| 300 s 无有效帧（launch 默认） | 进入重连逻辑，运行阶段每 10 s 重试一次 |
 | 运行中读/写异常 | 置 `link_error_`，立即视为失联，按 10 s 节流重连 |
 | 运行中串口拔出 | 自动重连，插回后恢复发布，无需重启节点 |
 
@@ -347,7 +347,7 @@ rostopic echo -n1 /perception_sensors/uwb_status
 | `uwb_node.cpp` | 不解析标签 ID | 多标签场景无法区分来源 |
 | `main.cpp` | 重连在 30 Hz 主循环内同步执行 | `open()` 失败通常很快返回，但设备异常时可能阻塞到驱动超时，期间的帧会延后处理 |
 | `main.cpp` | 重连只重开同一设备路径 | USB 重新枚举成 `/dev/ttyUSB1` 等新名字时，需改 launch 参数或补 udev 规则 |
-| `main.cpp` | 标签静态休眠超过 30 s 会触发无意义重连 | 重连成功会重置 `last_frame_time_`，约每 30 s 重开一次串口；不丢定位帧，但日志会周期性出现重连记录。标签静态间隔调大时，同步调大 launch 参数 `uwb_link_fail_timeout_ms` |
+| `main.cpp` | 标签静态休眠超过重连阈值会触发无意义重连 | 重连成功会重置 `last_frame_time_`，每过一个阈值周期重开一次串口；不丢定位帧，但日志会周期性出现重连记录。launch 默认已放宽到 300 s，标签静态间隔更长时需同步调大 `uwb_link_fail_timeout_ms` |
 | `main.cpp` | 轮询频率、心跳与重连阈值仍写死 | 改这些值需重新编译（串口与打印开关已进 launch） |
 | `uwb_data.msg` | 无 `header` | 无精确时间戳、无坐标系标识 |
 | `rtu_client.cpp` | 只接受 03H 应答 | 将来下发 40H/50H 时需扩展应答解析 |

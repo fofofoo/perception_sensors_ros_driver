@@ -42,7 +42,7 @@
   <param name="reprobe_interval" value="30.0" />
 
   <!-- 每个轮询周期打印 4 路原始 mm 值和换算后的距离 -->
-  <param name="print_data" value="true" />
+  <param name="print_data" value="false" />
 
   <!-- 现场排障时改为 true，会打印 Modbus TCP 收发字节 -->
   <param name="debug_frames" value="false" />

@@ -30,7 +30,7 @@
   <param name="uwb_serial_port" value="/dev/ttyUWB"/>
 
   <!-- 是否逐帧打印定位结果；正式运行可设为 false -->
-  <param name="uwb_print_frame" value="true"/>
+  <param name="uwb_print_frame" value="false"/>
 
   <!-- 无帧告警阈值，ms：超过该时长没有 CRC 有效帧时告警，并把
        /perception_sensors/uwb_status 置为 false。需大于标签静态休眠间隔
@@ -39,7 +39,7 @@
 
   <!-- 连续无有效帧触发重连的阈值，ms：必须大于 uwb_heartbeat_timeout_ms，
        保证「先报失效、后重连」；也要大于标签静态休眠间隔 -->
-  <param name="uwb_link_fail_timeout_ms" value="30000"/>
+  <param name="uwb_link_fail_timeout_ms" value="300000"/>
 
   <!-- 启动时打不开串口 / 运行中失联后的重连间隔，秒 -->
   <param name="uwb_startup_retry_sec" value="5.0"/>
