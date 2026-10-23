@@ -29,7 +29,11 @@
     </include>
 
     <!-- ================= 3. UWB 基站 ================= -->
-    <include file="$(find uwb_rtu_serial_demo)/launch/uwb_node.launch"/>
+    <!-- 顶层一键启动是独立采集系统，没有旧 serial_demo 节点可订阅，
+         必须显式打开主动采集；单独跑 uwb_node.launch 时默认是旁路订阅。 -->
+    <include file="$(find uwb_rtu_serial_demo)/launch/uwb_node.launch">
+        <arg name="uwb_self_collect" value="true"/>
+    </include>
 
     <!-- ================= 4. rosbag 录制控制 ================= -->
     <include file="$(find bag_recorder)/launch/bag_recorder.launch">

@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <string>
 
+#include <ros/names.h>
 #include <ros/ros.h>
 #include <std_msgs/Bool.h>
 
@@ -13,18 +15,26 @@
 #include "uwb_rtu_serial_demo/uwb_node.h"
 
 /**
- * UWB 定位数据串口节点（D-PDOA-Node-B 基站，Modbus-RTU over TTL UART）。
+ * UWB 定位数据节点（D-PDOA-Node-B 基站，Modbus-RTU over TTL UART）。
  *
- * 数据流：
+ * 两种运行模式（launch 参数 uwb_self_collect）：
+ *   主动采集（true）：打开串口 → RtuClient 成帧 + CRC → UwbNode 解码 → 发布统一话题；
+ *   旁路订阅（false，默认）：不打开串口、不重连，订阅旧 serial_demo 节点发布的 uwb_position，
+ *     原样转发到 /perception_sensors/uwb_position，并维护 uwb_status。
+ *
+ * 主动采集数据流：
  *   基站主动推送 03H 应答帧 → RtuClient 成帧 + CRC 校验 → UwbNode 过滤 CA DA 定位帧并换算单位
  *    → main 发布 /perception_sensors/uwb_position（uwb_rtu_serial_demo/uwb_data）。
+ *
+ * 旁路订阅数据流：
+ *   /uwb_position（旧 serial_demo/uwb_data，字段与本包一致，MD5 相同）
+ *    → 回调原样转发到 /perception_sensors/uwb_position，并刷新最近收帧时间 → uwb_status。
  *
  * 话题：
  *   /perception_sensors/uwb_position —— 定位数据，收一帧发一帧
  *   /perception_sensors/uwb_status   —— 链路状态 std_msgs/Bool，跳变时发布（latched）
  *
- * 本节点是「主动轮询型」：串口只读不写。基站定位成功后自动输出坐标，
- * PC 无需发送任何指令开启数据输出（手册 4.4（1））。
+ * 主动采集时串口只读不写，基站定位成功后自动输出坐标，PC 无需发送指令（手册 4.4（1））。
  */
 // ==================== 节点参数 ====================
 // 现场可调项放 launch 全局参数（launch/uwb_node.launch），main 用 nh.param 读取，
@@ -35,6 +45,8 @@
 //   uwb_link_fail_timeout_ms   ：连续无有效帧触发重连的阈值，ms
 //   uwb_startup_retry_sec      ：启动打不开串口时的重试间隔，秒
 //   uwb_runtime_reconnect_sec  ：运行中失联后的最小重连间隔，秒
+//   uwb_self_collect           ：false=旁路订阅外部话题（默认）；true=本节点主动采集串口
+//   uwb_source_topic           ：旁路模式订阅的来源话题，默认旧节点的 /uwb_position
 // 其余参数属于协议固定值或内部调优值，直接写在 main 里。
 const uint32_t kBaudrate            = 115200;   // 手册 4.1：固定 115200 8N1，不要改
 const double   kLoopRateHz          = 30.0;     // 串口轮询频率，Hz；为标签默认 10 Hz / 上限 20 Hz 的 1.5~3 倍
@@ -42,6 +54,11 @@ const int      kHeartbeatTimeoutMs  = 15000;    // 无帧告警阈值，需大�
 const int      kLinkFailTimeoutMs   = 30000;    // 连续无有效帧触发重连的阈值，需大于告警值并留出休眠余量
 const double   kStartupRetrySec     = 5.0;      // 启动打不开串口时的重试间隔，秒；首轮也等这个间隔
 const double   kRuntimeReconnectSec = 10.0;     // 运行中失联后的最小重连间隔，秒
+
+// 运行模式与旁路来源话题（launch 全局参数 uwb_self_collect / uwb_source_topic 的默认值）。
+// 默认旁路：不打开串口、不参与重连，只订阅旧 serial_demo 节点的话题做转发与状态监控。
+const bool        kSelfCollect      = false;
+const std::string kSourceTopic      = "/uwb_position";
 
 namespace
 {
@@ -75,12 +92,16 @@ int main(int argc, char* argv[])
     int         link_fail_timeout_ms;
     double      startup_retry_sec;
     double      runtime_reconnect_sec;
+    bool        self_collect;
+    std::string source_topic;
     nh.param<std::string>("uwb_serial_port", serial_port, "/dev/ttyUWB");
     nh.param<bool>       ("uwb_print_frame", print_frame, true);
     nh.param<int>        ("uwb_heartbeat_timeout_ms", heartbeat_timeout_ms, kHeartbeatTimeoutMs);
     nh.param<int>        ("uwb_link_fail_timeout_ms", link_fail_timeout_ms, kLinkFailTimeoutMs);
     nh.param<double>     ("uwb_startup_retry_sec", startup_retry_sec, kStartupRetrySec);
     nh.param<double>     ("uwb_runtime_reconnect_sec", runtime_reconnect_sec, kRuntimeReconnectSec);
+    nh.param<bool>       ("uwb_self_collect", self_collect, kSelfCollect);
+    nh.param<std::string>("uwb_source_topic", source_topic, kSourceTopic);
 
     // 参数一致性校验：非法值直接回退，避免运行期出现「状态还没报失效就先重连」
     // 或 while 循环里每轮都尝试重连（间隔 <= 0）。
@@ -111,11 +132,105 @@ int main(int argc, char* argv[])
                  runtime_reconnect_sec, kRuntimeReconnectSec);
         runtime_reconnect_sec = kRuntimeReconnectSec;
     }
-    ROS_INFO("UWB 参数：串口=%s，告警 %d ms，失联重连 %d ms，启动重试 %.1f s，运行重连 %.1f s",
-             serial_port.c_str(), heartbeat_timeout_ms, link_fail_timeout_ms,
-             startup_retry_sec, runtime_reconnect_sec);
 
-    // —— 二、打开串口 ——
+    // 旁路模式的来源话题校验：必须非空，且不能指向本节点自己的转发目标。
+    // 来源与目标相同时，发布的消息会再次进入自己的订阅回调，形成无限自环。
+    if (!self_collect)
+    {
+        if (source_topic.empty())
+        {
+            ROS_ERROR("uwb_source_topic 为空：旁路模式没有可订阅的来源话题");
+            return 1;
+        }
+        if (ros::names::resolve(source_topic) == "/perception_sensors/uwb_position")
+        {
+            ROS_ERROR("uwb_source_topic=%s 与转发目标 /perception_sensors/uwb_position 相同，会形成自环",
+                      source_topic.c_str());
+            return 1;
+        }
+    }
+
+    if (self_collect)
+    {
+        ROS_INFO("UWB 参数：串口=%s，告警 %d ms，失联重连 %d ms，启动重试 %.1f s，运行重连 %.1f s",
+                 serial_port.c_str(), heartbeat_timeout_ms, link_fail_timeout_ms,
+                 startup_retry_sec, runtime_reconnect_sec);
+    }
+    else
+    {
+        ROS_INFO("UWB 旁路模式：订阅 %s → /perception_sensors/uwb_position，告警 %d ms（不打开串口、不重连）",
+                 source_topic.c_str(), heartbeat_timeout_ms);
+    }
+
+    // —— 二、旁路模式：订阅外部话题，转发并检测链路状态 ——
+    // 适用场景：旧 serial_demo 节点仍在采集串口，本节点只做旁路监控与统一话题转发。
+    // 边界：
+    //   - 不创建 RtuClient、不打开串口、不做重连，可与旧节点同时运行，启动顺序无关；
+    //   - 订阅类型用本包 uwb_data：与旧包 serial_demo/uwb_data 字段逐字节相同，
+    //     ROS1 按 MD5 握手，能接上旧节点发布者；旧包一旦改 msg 字段，连接会静默断开；
+    //   - fre 原样转发，不做二次统计；
+    //   - 超过 heartbeat_timeout_ms 收不到消息时把 /perception_sensors/uwb_status 置 false。
+    if (!self_collect)
+    {
+        ros::Publisher pub = nh.advertise<uwb_rtu_serial_demo::uwb_data>(
+            "/perception_sensors/uwb_position", 10);
+        ros::Publisher status_pub = nh.advertise<std_msgs::Bool>(
+            "/perception_sensors/uwb_status", 10, true);
+
+        auto last_rx = std::chrono::steady_clock::now();
+        bool last_online = false;
+        bool status_published = false;
+
+        auto relay = [&](const uwb_rtu_serial_demo::uwb_data::ConstPtr& msg)
+        {
+            last_rx = std::chrono::steady_clock::now();
+            pub.publish(*msg);   // fre 等字段原样转发，保持旧节点语义
+
+            if (print_frame)
+            {
+                ROS_INFO("x: %.2f m, y: %.2f m, distance: %.2f m, angle: %.2f deg, fre: %u",
+                         msg->x, msg->y, msg->distance, msg->angle,
+                         static_cast<unsigned>(msg->fre));
+            }
+        };
+        ros::Subscriber sub = nh.subscribe<uwb_rtu_serial_demo::uwb_data>(
+            source_topic, 10, relay);
+
+        // 1 Hz 检查最近一次收到消息的时间；首轮必发一次，之后只在跳变时发布。
+        // 阈值沿用 uwb_heartbeat_timeout_ms：必须大于标签静态休眠间隔（默认 10 s）。
+        ros::Timer status_timer = nh.createTimer(
+            ros::Duration(1.0),
+            [&](const ros::TimerEvent&)
+            {
+                const bool online =
+                    std::chrono::steady_clock::now() - last_rx
+                    <= std::chrono::milliseconds(heartbeat_timeout_ms);
+                if (!status_published || online != last_online)
+                {
+                    std_msgs::Bool status_msg;
+                    status_msg.data = online;
+                    status_pub.publish(status_msg);
+
+                    if (online)
+                    {
+                        ROS_INFO("UWB 链路在线（旁路）");
+                    }
+                    else
+                    {
+                        ROS_WARN("UWB 链路超时：超过 %d ms 未收到 %s 的消息",
+                                 heartbeat_timeout_ms, source_topic.c_str());
+                    }
+
+                    last_online = online;
+                    status_published = true;
+                }
+            });
+
+        ros::spin();
+        return 0;
+    }
+
+    // —— 三、打开串口 ——
     // 打不开也继续运行：单设备掉线不应该拖垮顶层 launch 里的其它传感器；
     // 主循环会用同一个 client 按 startup_retry_sec 周期重试。
     uwb_rtu_serial_demo::RtuClient client;
@@ -140,7 +255,7 @@ int main(int argc, char* argv[])
     ros::Publisher status_pub =
         nh.advertise<std_msgs::Bool>("/perception_sensors/uwb_status", 10, true);
 
-    // —— 三、心跳与重连状态 ——
+    // —— 四、心跳与重连状态 ——
     uint32_t frequency = 0;      // 最近一个 1 秒窗口内的收帧数，写入消息 fre 字段
     bool stale_warned = false;   // 链路超时告警只打一次，恢复后复位
 
@@ -158,7 +273,7 @@ int main(int argc, char* argv[])
             static_cast<int64_t>(startup_retry_sec * 1000.0));
     }
 
-    // —— 四、主动轮询 + 发布 ——
+    // —— 五、主动轮询 + 发布 ——
     // 每轮把缓冲里已到达的帧全部取完再发布：正常情况下 30 Hz 轮询 > 10~20 Hz 数据，
     // 每轮 0~1 帧；系统卡顿或标签提频导致积压时也能一次清空，不会留下旧数据。
     ros::Rate loop_rate(kLoopRateHz);
@@ -211,7 +326,7 @@ int main(int argc, char* argv[])
             }
         }
 
-        // —— 五、链路探针与重连 ——
+        // —— 六、链路探针与重连 ——
         // 外层循环 30 Hz，检测很快；真正 open 按启动/运行两档间隔节流，不会每轮都重连。
         // isAlive() 已包含 link_error_ 判断，拔线异常会立即进入该分支。
         if (!client.isAlive(link_fail_timeout_ms))
@@ -234,7 +349,7 @@ int main(int argc, char* argv[])
             }
         }
 
-        // —— 六、发布链路状态 ——
+        // —— 七、发布链路状态 ——
         // isAlive() 已包含「串口未打开 / 读写异常 / 超时无有效帧」三种情况。
         // 阈值取无帧告警阈值 heartbeat_timeout_ms，而不是失联重连阈值 link_fail_timeout_ms：
         // 下游要比重连早一步知道数据已失效。串口刚打开时 last_frame_time 被重置，

@@ -7,6 +7,11 @@ D-PDOA-Node-B 基站经 **TTL UART（USB-TTL，默认 `/dev/ttyUWB`）** 输出
 
 ## 话题
 
+节点有两种运行模式（launch 参数 `uwb_self_collect`）：默认**旁路订阅**，不打开串口，
+订阅旧 `serial_demo` 节点发布的 `/uwb_position` 并原样转发到
+`/perception_sensors/uwb_position`；`uwb_self_collect:=true` 时才主动采集串口。
+两种模式下对外话题相同，订阅方不需要区分。
+
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
 | `/perception_sensors/uwb_position` | `uwb_rtu_serial_demo/uwb_data` | 每收到一帧有效定位帧发布一次；频率跟随标签发包（动态默认约 10 Hz，静态可低至 0.05 Hz）；队列 10 |
@@ -57,6 +62,20 @@ float32 distance
 
 ## 默认行为
 
+默认运行模式是**旁路订阅**（`uwb_self_collect=false`）：
+
+- 不打开串口、不创建 `RtuClient`、不重连，可与旧 `serial_demo` 节点同时运行，启动顺序无关；
+- 订阅 `uwb_source_topic`（默认 `/uwb_position`），在回调里原样转发到
+  `/perception_sensors/uwb_position`，`fre` 等字段不改写；
+- 1 Hz 检查最近一次收帧时间，超过 `uwb_heartbeat_timeout_ms`（默认 15 s）把
+  `/perception_sensors/uwb_status` 置 `false`；首轮必发，之后只在跳变时发布；
+- 转发目标与来源话题相同时会报错退出，避免自环；
+- 订阅类型用本包 `uwb_rtu_serial_demo/uwb_data` 接旧包 `serial_demo/uwb_data`：
+  两边字段逐字节相同，ROS1 按 MD5 握手可以连接；**旧包一旦修改 msg 字段，连接会静默断开**，
+  需要同步更新。
+
+主动采集模式（`uwb_self_collect:=true`）的行为如下：
+
 - 串口**只读不写**：基站定位成功后主动推送，PC 无需问询（手册 4.4（1））；
 - 轮询频率 **30 Hz**（`kLoopRateHz = 30.0`），每轮把缓冲中已到达的帧全部取完再发布；
   依据：标签动态默认 10 Hz、上限 20 Hz，30 Hz 约为数据频率的 1.5~3 倍；
@@ -75,9 +94,11 @@ float32 distance
 
 ## 掉线重连方案
 
-本节描述当前实现，以及评估过的另外两种落点。串口是单设备、单消费者，最终选择在
-`main.cpp` 的外层轮询里直接检测并重连；`UwbNode` 保持纯解码，`RtuClient` 只负责
-底层异常捕获与重开。
+本节只适用于**主动采集模式**。旁路模式不打开串口、不参与重连，来源停止发布时仅把
+`/perception_sensors/uwb_status` 置 `false`，来源恢复后自动跟随，无需节点做任何动作。
+
+主动采集模式下，串口是单设备、单消费者，最终选择在 `main.cpp` 的外层轮询里直接检测并重连；
+`UwbNode` 保持纯解码，`RtuClient` 只负责底层异常捕获与重开。
 
 | 环节 | 当前实现 |
 | --- | --- |
@@ -140,7 +161,9 @@ float32 distance
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `uwb_serial_port` | `/dev/ttyUWB` | 基站 TTL 转串口设备路径；无 udev 时改成 `/dev/ttyUSB0` 等 |
+| `uwb_self_collect` | `false` | 运行模式：`false`=旁路订阅外部话题（不占串口、不重连）；`true`=主动打开串口采集 |
+| `uwb_source_topic` | `/uwb_position` | 旁路模式订阅的来源话题；不能与转发目标 `/perception_sensors/uwb_position` 相同 |
+| `uwb_serial_port` | `/dev/ttyUWB` | 基站 TTL 转串口设备路径；无 udev 时改成 `/dev/ttyUSB0` 等；仅主动采集模式使用 |
 | `uwb_print_frame` | `true` | 是否逐帧打印定位结果；正式运行可设 `false` |
 | `uwb_heartbeat_timeout_ms` | `15000` | 无帧告警阈值，ms：无有效帧多久告警、状态话题置 `false`；需大于标签静态休眠间隔（默认 10 s），休眠调大时同步调大 |
 | `uwb_link_fail_timeout_ms` | `30000` | 连续无有效帧触发重连的阈值，ms；必须大于 `uwb_heartbeat_timeout_ms`，且大于标签静态休眠间隔 |
@@ -153,7 +176,11 @@ float32 distance
 参数属于全局命名空间，命令行可直接覆盖：
 
 ```bash
-roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_serial_port:=/dev/ttyUSB0
+# 默认旁路：订阅旧节点 /uwb_position，不占串口
+roslaunch uwb_rtu_serial_demo uwb_node.launch
+# 主动采集：先停掉旧 serial_demo，再打开本节点串口
+roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_self_collect:=true \
+    uwb_serial_port:=/dev/ttyUSB0
 roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_print_frame:=false
 # 标签静态休眠调到 30 s：告警与重连阈值一起调大
 roslaunch uwb_rtu_serial_demo uwb_node.launch \
@@ -170,14 +197,17 @@ roslaunch uwb_rtu_serial_demo uwb_node.launch \
 | `kLinkFailTimeoutMs` | `30000` | `uwb_link_fail_timeout_ms` 的默认值，launch 可覆盖 |
 | `kStartupRetrySec` | `5.0` | `uwb_startup_retry_sec` 的默认值，launch 可覆盖 |
 | `kRuntimeReconnectSec` | `10.0` | `uwb_runtime_reconnect_sec` 的默认值，launch 可覆盖 |
+| `kSelfCollect` | `false` | `uwb_self_collect` 的默认值，launch 可覆盖 |
+| `kSourceTopic` | `/uwb_position` | `uwb_source_topic` 的默认值，launch 可覆盖 |
 
 ### 代码写死
 
 | 项目 | 值 | 位置 |
 | --- | --- | --- |
 | 话题名 | `/perception_sensors/uwb_position` | `main.cpp` 的 `nh.advertise<...>("/perception_sensors/uwb_position", 10)` |
-| 发布队列 | `10` | 同上，约 1 秒缓存 |
-| 消息类型 | `uwb_rtu_serial_demo/uwb_data` | 同上 |
+| 旁路订阅队列 | `10` | `main.cpp` 的 `nh.subscribe<...>(source_topic, 10, relay)` |
+| 发布队列 | `10` | 同 advertise，约 1 秒缓存 |
+| 消息类型 | `uwb_rtu_serial_demo/uwb_data` | 两种模式都用本包类型 |
 | 串口格式 | 8N1 | [rtu_client.cpp](src/rtu_client.cpp) 的 `open()` |
 | 只接受功能码 | `03H` | [rtu_client.h](include/uwb_rtu_serial_demo/rtu_client.h) 的 `kFuncRead` |
 | 接收缓冲上限 | 4096 字节 | `rtu_client.h` 的 `kMaxBuffer` |
@@ -203,13 +233,17 @@ launch 文件：[launch/uwb_node.launch](launch/uwb_node.launch)。现场可调�
 定义，属于全局命名空间。
 
 ```bash
-# 默认参数启动
+# 默认参数启动（旁路订阅，不占串口）
 roslaunch uwb_rtu_serial_demo uwb_node.launch
 
-# 指定串口并关闭逐帧打印
+# 主动采集：指定串口并关闭逐帧打印（先停旧 serial_demo）
 roslaunch uwb_rtu_serial_demo uwb_node.launch \
+  uwb_self_collect:=true \
   uwb_serial_port:=/dev/ttyUSB0 \
   uwb_print_frame:=false
+
+# 旁路订阅其它来源话题
+roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_source_topic:=/uwb_position
 ```
 
 轮询频率、心跳阈值、重连阈值仍需改 [main.cpp](src/main.cpp) 顶部常量后重新编译。
@@ -222,21 +256,23 @@ catkin_make --only-pkg-with-deps uwb_rtu_serial_demo \
   -DPYTHON_EXECUTABLE=/usr/bin/python3
 source devel/setup.bash
 
-# 启动节点（推荐，参数见 launch 文件）
+# 默认启动（旁路订阅，先起旧 serial_demo 或之后起都可以）
 roslaunch uwb_rtu_serial_demo uwb_node.launch
 
-# 指定串口设备
-roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_serial_port:=/dev/ttyUSB0
+# 主动采集（先停掉旧 serial_demo，避免串口被占）
+roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_self_collect:=true \
+    uwb_serial_port:=/dev/ttyUSB0
 
-# 或直接 rosrun（使用 main.cpp 中的默认值）
+# 或直接 rosrun（使用 main.cpp 中的默认值：旁路订阅 /uwb_position）
 rosrun uwb_rtu_serial_demo uwb_node
 ```
 
 运行前置：
 
-- `/dev/ttyUWB` 存在，或启动时用 `uwb_serial_port:=...` 指定实际设备；
-- 当前用户在 `dialout` 组，对串口有读写权限；
-- 标签已加入基站 K 列表，否则只会收到新标签上报帧、不会收到定位帧。
+- 旁路模式（默认）：旧 `serial_demo` 节点在跑并发布 `/uwb_position` 即可，不要求串口权限；
+- 主动采集模式：`/dev/ttyUWB` 存在或启动时用 `uwb_serial_port:=...` 指定实际设备；
+  当前用户在 `dialout` 组，对串口有读写权限；
+- 主动采集还要求标签已加入基站 K 列表，否则只会收到新标签上报帧、不会收到定位帧。
 
 验证：
 
@@ -255,7 +291,7 @@ rostopic echo -n1 /perception_sensors/uwb_status
 
 | 文件 | 职责 |
 | --- | --- |
-| [src/main.cpp](src/main.cpp) | 读取 launch 参数与字面量参数、打开串口、创建 `UwbNode`、`advertise("/perception_sensors/uwb_position", 10)`、30 Hz 轮询循环、逐帧发布、心跳告警、链路探针与节流重连 |
+| [src/main.cpp](src/main.cpp) | 读取 launch 参数与字面量参数；旁路模式只订阅来源话题、原样转发并做 1 Hz 状态判定；主动采集模式打开串口、创建 `UwbNode`、`advertise("/perception_sensors/uwb_position", 10)`、30 Hz 轮询循环、逐帧发布、心跳告警、链路探针与节流重连 |
 | [src/rtu_client.cpp](src/rtu_client.cpp) / [include/uwb_rtu_serial_demo/rtu_client.h](include/uwb_rtu_serial_demo/rtu_client.h) | **无 ROS 依赖**的 Modbus-RTU 客户端：打开/关闭/重开串口、读写异常捕获、字节流累积、帧头同步、CRC16、收帧心跳 |
 | [src/uwb_node.cpp](src/uwb_node.cpp) / [include/uwb_rtu_serial_demo/uwb_node.h](include/uwb_rtu_serial_demo/uwb_node.h) | **无 ROS 依赖**的业务解码：过滤定位帧、校验 `CA DA`、大端转换、单位换算 |
 | [msg/uwb_data.msg](msg/uwb_data.msg) | 话题消息定义 |
@@ -316,6 +352,8 @@ rostopic echo -n1 /perception_sensors/uwb_status
 | `uwb_data.msg` | 无 `header` | 无精确时间戳、无坐标系标识 |
 | `rtu_client.cpp` | 只接受 03H 应答 | 将来下发 40H/50H 时需扩展应答解析 |
 | `uwb_node.cpp` | 不做坐标变换、滤波、平滑 | 输出为基站本地原始坐标 |
+| `main.cpp` | 旁路模式依赖两边 msg 的 MD5 相同 | 用 `uwb_rtu_serial_demo/uwb_data` 订阅旧 `serial_demo/uwb_data`；旧包一旦修改字段，连接会静默断开，转发话题和状态检测都收不到数据 |
+| `main.cpp` | 旁路模式看不到串口层 CRC | 只能反映旧节点是否还在发消息，无法发现旧节点已经发布的错误数据 |
 | 硬件 | 基站背面无法定位 | 标签需处于基站正面约 120° 内 |
 
 协议、接线、排障与更多现场问题见[仓库 README](../../../README.md)。

@@ -14,11 +14,12 @@
      | --- | --- |
      | Airy360 | 官方驱动 UDP 收包；滑动窗口多帧累加后 10 Hz 发布 |
      | 超声波雷达 | 两组 M04 网关各 4 路，0.3 s 轮询，按轮聚合成一条消息 |
-     | UWB | 串口主动轮询，字节流分帧 + CRC16，收一帧发一帧 |
+     | UWB | 默认旁路订阅旧节点话题并转发；顶层一键启动时主动采集串口，字节流分帧 + CRC16，收一帧发一帧 |
 
    - 每类设备都有 latched 的链路状态话题（激光雷达 1 个、超声波每台网关 1 个、UWB 1 个），
      只在 `true`/`false` 跳变时发布，后启动的订阅者也能立即拿到当前状态；
-   - 断线自恢复：UWB 启动失败每 5 s 重试、运行中失联每 10 s 重连；超声波已上线断线按 1 s 重连，
+   - 断线自恢复：UWB 主动采集模式下启动失败每 5 s 重试、运行中失联每 10 s 重连；旁路订阅模式
+     不打开串口、不重连，只随来源停发把状态话题置 `false`；超声波已上线断线按 1 s 重连，
      启动探测失败的网关由后台线程每 30 s 重探；激光雷达重连由官方驱动内置处理，预处理节点负责
      20 s 心跳判定并在超时期间清空累加窗口。详见[设备在线状态与重连参数](#设备在线状态与重连参数)。
 
@@ -82,9 +83,10 @@ UWB 基站 ──TTL 115200──► uwb_node ──/perception_sensors/uwb_posi
   启动时读不到数据的网关先跳过，由后台线程每 30 s 重探，接好模组后自动上线。
   掉线重连细节与拔线测试步骤见
   [ultrasonic_radar_modbus_tcp/README.md](catkin_ws/src/ultrasonic_radar_modbus_tcp/README.md#掉线重连方案)。
-- UWB：串口主动轮询，收一帧发一帧；启动时打不开串口不退出，每 5 s 重试；运行中读写异常或
-  30 s 无有效帧时按 10 s 节流自动重连，插回 USB-TTL 后无需重启节点。判定细节、三种重连落点
-  对比与拔串口测试步骤见
+- UWB：顶层一键启动和手动 `uwb_self_collect:=true` 时串口主动轮询，收一帧发一帧；启动时打不开
+  串口不退出，每 5 s 重试；运行中读写异常或 30 s 无有效帧时按 10 s 节流自动重连，插回 USB-TTL
+  后无需重启节点。默认旁路模式不打开串口，只订阅旧 `serial_demo` 的 `/uwb_position` 并原样转发到
+  `/perception_sensors/uwb_position`，不参与重连。判定细节、三种重连落点对比与拔串口测试步骤见
   [uwb_rtu_serial_demo/README.md](catkin_ws/src/uwb_rtu_serial_demo/README.md#掉线重连方案)。
 - 录制：服务事件驱动；联动节点只负责把底盘上装电源使能（`tops_power_enable`）翻译成
   start/stop 服务调用。另设 5 s 断流保护：底盘停止发布 `/chassis_msg` 时自动停录，
@@ -244,7 +246,7 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 | 激光雷达 | `/perception_sensors/processed_lidar_connection_status` | 20 s 内没有收到点云 | 重连由 `rslidar_sdk` 内置处理，本仓库不实现；雷达恢复发包后自动恢复。`lidar_preprocess` 在超时期间清空累加窗口，恢复后要重新攒满 `frame_quantity` 帧（默认约 1 s）才输出点云 |
 | 超声波左（502） | `/perception_sensors/ultrasonic_radar_status/left_radar_502` | 本轮读寄存器失败：应答超时、连接被拒、网关忙或异常帧；启动探测失败也是 `false` | 已上线断线按 1 s 重连；启动就失败的端口由后台线程每 30 s 重探 |
 | 超声波右（503） | `/perception_sensors/ultrasonic_radar_status/right_radar_503` | 同上 | 同上 |
-| UWB | `/perception_sensors/uwb_status` | 串口未打开、读写异常，或 15 s 内没有 CRC 有效的整帧 | 启动打不开每 5 s 重试；运行中失联每 10 s 重连，插回串口后自动恢复 |
+| UWB | `/perception_sensors/uwb_status` | 主动采集：串口未打开、读写异常，或 15 s 内没有 CRC 有效的整帧；旁路订阅：15 s 内没收到来源话题的消息 | 主动采集：启动打不开每 5 s 重试，运行中失联每 10 s 重连；旁路订阅：来源恢复发布后自动恢复，节点不做重连 |
 
 重连相关参数：
 
@@ -256,10 +258,12 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 | 超声波 | `timeout` | 0.5 s | launch | TCP 连接与单次应答超时 |
 | 超声波 | `reconnect_interval` | 1.0 s | launch | 已上线服务器断线后的重连间隔 |
 | 超声波 | `reprobe_interval` | 30.0 s | launch | 启动探测失败端口的后台重探间隔；`0` 关闭 |
-| UWB | `uwb_heartbeat_timeout_ms` | 15 s | launch | 无有效帧多久告警、状态话题置 `false` |
-| UWB | `uwb_link_fail_timeout_ms` | 30 s | launch | 连续无有效帧多久触发重连 |
-| UWB | `uwb_startup_retry_sec` | 5 s | launch | 启动打不开串口时的重试间隔 |
-| UWB | `uwb_runtime_reconnect_sec` | 10 s | launch | 运行中失联后的重连间隔 |
+| UWB | `uwb_self_collect` | `false`（顶层 launch 显式传 `true`） | launch | 运行模式：`false` 旁路订阅外部话题，`true` 主动采集串口 |
+| UWB | `uwb_source_topic` | `/uwb_position` | launch | 旁路模式订阅的来源话题；不能等于转发目标 |
+| UWB | `uwb_heartbeat_timeout_ms` | 15 s | launch | 无有效帧多久告警、状态话题置 `false`；两种模式都用 |
+| UWB | `uwb_link_fail_timeout_ms` | 30 s | launch | 连续无有效帧多久触发重连；仅主动采集模式 |
+| UWB | `uwb_startup_retry_sec` | 5 s | launch | 启动打不开串口时的重试间隔；仅主动采集模式 |
+| UWB | `uwb_runtime_reconnect_sec` | 10 s | launch | 运行中失联后的重连间隔；仅主动采集模式 |
 
 几点语义：
 
@@ -310,7 +314,8 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 | --- | --- | --- | --- |
 | 激光雷达 | Airy360 600 rpm，约 10 Hz | 回调每帧入队，后台线程维护累加长度 `frame_quantity` 的窗口；主循环 10 Hz 轮询 | ≈10 Hz；前 `frame_quantity` 帧（默认 10 帧 ≈1 s）不输出；每帧点数是窗口内各帧直接相加，默认约 10 倍带宽 |
 | 超声波 | 设备只应答，不主动推送 | `poll_interval=0.3 s`，每轮遍历两个网关 | ≈3.3 Hz，每轮一条聚合消息 |
-| UWB | 标签驱动：动态默认约 10 Hz，上限 20 Hz；静态默认 0.1 Hz（可配置到 0.05 Hz） | 30 Hz 串口轮询，每轮取完缓冲 | 等于有效定位帧频率，不是固定 30 Hz |
+| UWB（主动采集） | 标签驱动：动态默认约 10 Hz，上限 20 Hz；静态默认 0.1 Hz（可配置到 0.05 Hz） | 30 Hz 串口轮询，每轮取完缓冲 | 等于有效定位帧频率，不是固定 30 Hz |
+| UWB（旁路订阅） | 跟随来源话题（旧节点约 10 Hz） | 订阅回调，收一帧转发一帧 | 等于来源话题频率 |
 | 录制 | 事件驱动 | 服务 start/stop | 无周期 |
 | 上装电源使能 | 由底盘发布（频率未知） | 回调内按 `tops_power_enable` 去重，仅跳变时调服务；1 Hz 看门狗检测断流，5 s 无消息自动停录 | 无周期 |
 
@@ -345,7 +350,9 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 ```
 
 顶层 launch 依次 include：`lidar_preprocess` → `ultrasonic_radar_modbus_tcp` → `uwb_rtu_serial_demo`
-→ `bag_recorder`，最后启动上装电源联动节点。
+→ `bag_recorder`，最后启动上装电源联动节点。其中 UWB 的 include 显式传
+`uwb_self_collect:=true`，因此一键启动仍是主动采集；单独
+`roslaunch uwb_rtu_serial_demo uwb_node.launch` 默认是旁路订阅。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -356,7 +363,8 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 | `max_dir_size_gb` | `150.0` | 保存目录所有批次的总大小高水位（GB）；`<= 0` 关闭目录级清理 |
 | `dir_low_watermark_gb` | `130.0` | 目录清理目标低水位（GB），须小于高水位；非法时回退为「高水位 − 2 个单卷」 |
 
-UWB 串口名在 `uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置；雷达网络参数在
+UWB 运行模式（`uwb_self_collect` / `uwb_source_topic`）与串口名在
+`uwb_rtu_serial_demo/launch/uwb_node.launch` 中配置；雷达网络参数在
 `rslidar_sdk-v1.5.20/config/config.yaml` 中配置。
 
 ### 开机自启动（Jetson JetPack 5.1 / Ubuntu 20.04）
@@ -412,7 +420,8 @@ EOF
 ```bash
 roslaunch lidar_preprocess lidar_preprocess.launch
 roslaunch ultrasonic_radar_modbus_tcp ultrasonic_radar_modbus_tcp.launch
-roslaunch uwb_rtu_serial_demo uwb_node.launch
+roslaunch uwb_rtu_serial_demo uwb_node.launch                        # 默认旁路订阅
+roslaunch uwb_rtu_serial_demo uwb_node.launch uwb_self_collect:=true # 主动采集串口
 roslaunch bag_recorder bag_recorder.launch
 rosservice call /perception_sensors/start_bag_recorder
 rosservice call /perception_sensors/stop_bag_recorder
@@ -493,14 +502,14 @@ git archive --format=zip --prefix=perception_sensors_ros_driver/ \
 4. **录制开关取自 `/chassis_msg` 的 `chassis_relay_ctrl.tops_power_enable`**：只有 `1` 算打开，
    其余值按关闭处理；消息类型 `common_msgs/ChassisMsg` 定义在独立包 `catkin_ws/src/common_msgs/`。
    正在录制时超过 5 s 没收到 `/chassis_msg` 会自动停录，恢复且仍为 `1` 时自动续录。
-5. **UWB 的重连阈值必须大于标签静态休眠间隔**：15 s 无帧只告警，30 s 才自动重连；
+5. **UWB 的重连阈值必须大于标签静态休眠间隔（仅主动采集模式）**：15 s 无帧只告警，30 s 才自动重连；
    标签静态休眠默认 10 s 发一包，若现场把静态间隔调到 30 s 以上，需同步调大
-   `main.cpp` 的 `kLinkFailTimeoutMs`，否则会周期性做无意义的重连。断线期间不发布、
-   不补 0，下游需按超时判断数据失效。
+   `uwb_link_fail_timeout_ms`，否则会周期性做无意义的重连。断线期间不发布、不补 0，
+   下游需按超时判断数据失效。旁路订阅模式不打开串口、不重连，来源停发时只把状态话题置 `false`。
 6. **`doc/` 是历史工程文档副本**：其中的 `catkin_ws/src/...` 路径指向原独立工作区，在本仓库里
    可能不存在，读取协议和排障信息可以，按路径找代码不行。文档里的旧话题名
-   （`/lidar/processed_cloud`、`/lidar/connection_status`、`/uwb_position` 等）同样已过时，
-   以代码和本 README 的约定为准。
+   （`/lidar/processed_cloud`、`/lidar/connection_status` 等）同样已过时，以代码和本 README
+   的约定为准；`/uwb_position` 是旧 `serial_demo` 节点的话题，只在旁路模式下作为订阅来源。
 7. **裸的 `ERRCODE_MSOPTIMEOUT` 来自激光雷达驱动**：`rs_driver` 用 `std::cout` 直接打印、
    绕过 ROS 日志，所以没有 `[WARN]` 前缀和节点名。它是 MSOP 收包超过 1 s 的提示，零星出现可忽略；
    连续每秒刷说明雷达没在发包或主机收不到，按陷阱 1 检查网络与点云目的地址。
