@@ -23,8 +23,9 @@ log/rosbag/
 *.engine
 *.trt
 
-# 源码打包产物（git archive --format=zip）
+# 源码打包产物（git archive --format=zip / tar）
 *.zip
+*.tar
 
 # IDE 与本地配置
 .vscode/

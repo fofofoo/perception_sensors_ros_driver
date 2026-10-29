@@ -369,12 +369,14 @@ UWB 运行模式（`uwb_self_collect` / `uwb_source_topic`）与串口名在
 
 ### 开机自启动（Jetson JetPack 5.1 / Ubuntu 20.04）
 
-Jetson 默认自动登录桌面，这里用**桌面自启动**托管 [run.sh](run.sh)：开机进入桌面后自动弹出一个
-标题为「感知传感器」的终端窗口，内容与手动执行 `./run.sh` 相同，节点日志直接可见。
+Jetson 默认自动登录桌面，这里用**桌面自启动**托管启动脚本：开机进入桌面后自动弹出终端窗口，
+内容与手动执行 `./run.sh` 相同，节点日志直接可见。按工作区所在磁盘分两种接法。
+
+#### 工作区在本地盘
 
 ```bash
 # 1. 脚本可执行；UWB 串口需要 dialout 组权限（重新登录或重启后生效）
-chmod +x run.sh
+chmod +x run.sh run_follow.sh
 sudo usermod -aG dialout nvidia
 
 # 2. 写入自启动项（Exec 必须用部署后的绝对路径）
@@ -387,13 +389,72 @@ Comment=开机启动感知传感器 ROS 节点
 Exec=gnome-terminal --title="感知传感器" -- /data/code/perception_sensors_ros_driver/run.sh
 X-GNOME-Autostart-enabled=true
 EOF
+cat > ~/.config/autostart/perception-follow.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Perception Follow
+Comment=开机启动跟随控制 ROS 节点
+Exec=gnome-terminal --title="跟随控制" -- /data/code/perception_sensors_ros_driver/run_follow.sh
+X-GNOME-Autostart-enabled=true
+EOF
 ```
+
+#### 工作区在外挂盘
+
+两套工作区都放在外挂 SATA 盘 `/media/nvidia/sata` 上，桌面自启动可能早于 udisks 自动挂载。
+自启动项若直接指向盘上的脚本，开机时文件还不存在，窗口会立刻失败退出。因此用仓库根目录的
+[wait_mount_run.sh](wait_mount_run.sh) 做引导：先等挂载点就绪，再 `exec` 盘上的入口脚本。
+
+**引导脚本必须拷到本地盘**（如 `~/scripts/`）。若它本身放在外挂盘，硬盘没挂载时脚本文件都
+不存在，等待逻辑根本没有机会执行。
+
+```bash
+# 1. 引导脚本放本地盘；UWB 串口需要 dialout 组权限
+mkdir -p ~/scripts
+cp /media/nvidia/sata/code/perception_sensors_ros_driver/wait_mount_run.sh ~/scripts/
+chmod +x ~/scripts/wait_mount_run.sh
+sudo usermod -aG dialout nvidia
+
+# 2. 两个自启动项，各开一个终端窗口
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/perception-sensors.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Perception Sensors
+Comment=开机启动感知传感器 ROS 节点
+Exec=gnome-terminal --title="感知传感器" -- /home/nvidia/scripts/wait_mount_run.sh run.sh
+X-GNOME-Autostart-enabled=true
+EOF
+cat > ~/.config/autostart/perception-follow.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Perception Follow
+Comment=开机启动跟随控制 ROS 节点
+Exec=gnome-terminal --title="跟随控制" -- /home/nvidia/scripts/wait_mount_run.sh run_follow.sh
+X-GNOME-Autostart-enabled=true
+EOF
+```
+
+等待与启动行为：
+
+| 情况 | 结果 |
+| --- | --- |
+| 开机时盘已挂载 | 1 s 内进入入口脚本，窗口显示对应节点的日志 |
+| 盘在 300 s 内挂上 | 自动接上，无需人工干预 |
+| 盘未挂载 / 入口脚本不存在 | 等满 300 s 后打印错误，窗口停在「按回车关闭窗口」，**不启动任何节点** |
+| 盘晚于 300 s 才挂载 | 本次不启动，需手动跑入口脚本或重新登录桌面 |
+
+- 引导脚本判断的是 `mountpoint -q /media/nvidia/sata`，而不是只看目录或文件是否存在：
+  挂载点目录可能先被创建、盘却还没挂上。
+- [run_follow.sh](run_follow.sh) 内部 `cd ../../follow`，从工作区根上两级得到
+  `/media/nvidia/sata/follow`。该目录不在时，跟随窗口会在 `cd` 处失败退出。
+- 两个窗口相互独立：感知传感器按 `Ctrl+C` 不影响跟随控制，反之亦然。
 
 效果与操作：
 
 | 操作 | 结果 |
 | --- | --- |
-| 开机自动登录桌面 | 自动弹出「感知传感器」终端窗口并开始采集，与手动运行 `./run.sh` 一致 |
+| 开机自动登录桌面 | 自动弹出对应终端窗口并开始运行，与手动执行 `./run.sh` 一致 |
 | 窗口内按 `Ctrl+C` | 发 SIGINT，roslaunch 正常退出，`bag_recorder` 让 `rosbag record` 落盘后退出 |
 | 直接点窗口关闭按钮 | 发的是 SIGHUP，进程可能被强退；正在录制时可能残留 `.bag.active`，需 `rosbag reindex` |
 | 注销 / 重启 | 下次登录桌面时再次自启 |
