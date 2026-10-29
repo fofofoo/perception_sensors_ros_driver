@@ -48,8 +48,8 @@ ultrasonic_radar_data[] radars
 
 节点固定检测两个网关端口：
 
-- `192.168.1.15:503`
-- `192.168.1.15:502`
+- `192.168.1.12:503`
+- `192.168.1.12:502`
 
 两个端口共用同一台串口服务器和同一个从机地址。节点启动时会逐个探测：能正常读到寄存器的才进入轮询，
 读不到的（TCP 连不上、网关返回异常帧等）先跳过，**不占用主循环**；之后由后台线程每
@@ -104,7 +104,7 @@ ultrasonic_radar_data[] radars
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `gateway_ip` | `192.168.1.15` | 串口服务器 IP，两个端口共用 |
+| `gateway_ip` | `192.168.1.12` | 串口服务器 IP，两个端口共用 |
 | `port_1` | `503` | 第一个 Modbus 网关端口（HC1） |
 | `port_2` | `502` | 第二个 Modbus 网关端口（HC0） |
 | `poll_interval` | `0.3` | 轮询周期，秒；实测 0.25 会触发网关忙错误 |
@@ -124,7 +124,7 @@ ultrasonic_radar_data[] radars
 
 ```bash
 roslaunch ultrasonic_radar_modbus_tcp ultrasonic_radar_modbus_tcp.launch \
-  gateway_ip:=192.168.1.15 port_1:=503 port_2:=502
+  gateway_ip:=192.168.1.12 port_1:=503 port_2:=502
 ```
 
 从机地址固定为 `1`，写在 [src/main.cpp](src/main.cpp) 中。参数位于全局命名空间，

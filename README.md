@@ -57,7 +57,7 @@
 | 传感器 | 链路 | 地址 / 设备 | 关键参数 |
 | --- | --- | --- | --- |
 | Airy360 激光雷达 | 以太网 UDP | 雷达 `192.168.1.68`；主机 `192.168.1.100`；MSOP 6699 / DIFOP 7788 | `lidar_type: RSAIRY`，`use_lidar_clock: true` |
-| DYP 电应普超声波雷达（两组） | RS485 → M04 串口服务器 → 以太网 | 网关 `192.168.1.15`，502（车体左侧）/ 503（车体右侧） | RS485 9600 8N1，从机地址 1，每组 4 路探头 |
+| DYP 电应普超声波雷达（两组） | RS485 → M04 串口服务器 → 以太网 | 网关 `192.168.1.12`，502（车体左侧）/ 503（车体右侧） | RS485 9600 8N1，从机地址 1，每组 4 路探头 |
 | UWB 基站 | TTL UART → USB-TTL | 默认 `/dev/ttyUWB` | 115200 8N1，基站主动推送，PC 只读不写 |
 
 ## 数据流
@@ -126,9 +126,11 @@ rviz 累加点云、超声波数据、存储与链路状态、UWB 数据：
 | 5 s 未收到 `/chassis_msg` | 正在录制则自动停录，恢复且仍为 `1` 时自动续录 |
 | 手动 `rosservice call` | 直接控制录制，不依赖底盘消息 |
 
-默认录制话题（`record_topics`）为激光雷达原始点云 `/rslidar_points`、超声波与 UWB 两个感知结果话题；
-不含预处理累加点云 `/perception_sensors/processed_lidar_cloud` 与各类状态话题。原始点云单帧约 1.5 MB / 10 Hz，
-比 10 帧累加结果小约一个数量级，避免 rosbag 写入跟不上而丢帧。
+默认录制话题（`record_topics`）为激光雷达预处理结果 `/perception_sensors/processed_lidar_cloud`、
+超声波与 UWB 两个感知结果话题；不含原始点云 `/rslidar_points` 与各类状态话题。
+`lidar_preprocess` 默认 `frame_quantity=1`（不累加）并已做体素降采样、姿态修正与范围裁剪，
+数据量与原单帧相当，可直接录制；若把 `frame_quantity` 调大，处理结果会按倍数放大，
+需改回录原始点云或调大 rosbag 缓冲。
 
 遥控器拨杆触发录制开始和关闭：
 
@@ -218,7 +220,7 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 | 名称 | 类型 | 方向 | 频率 | 特殊语义 |
 | --- | --- | --- | --- | --- |
 | `/rslidar_points` | `sensor_msgs/PointCloud2` | 发布（驱动） | ≈10 Hz | 原始点云，`frame_id=rslidar` |
-| `/perception_sensors/processed_lidar_cloud` | `sensor_msgs/PointCloud2` | 发布 | ≈10 Hz | 窗口内 `frame_quantity` 帧逐点相加，启动后约 1 s 才有输出 |
+| `/perception_sensors/processed_lidar_cloud` | `sensor_msgs/PointCloud2` | 发布 | ≈10 Hz | 窗口内 `frame_quantity` 帧逐点相加（默认 1 帧即不累加），再降采样、按参数旋转与范围裁剪；默认首帧即可输出 |
 | `/perception_sensors/processed_lidar_connection_status` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；后启动的订阅者能立即拿到当前状态 |
 | `/perception_sensors/ultrasonic_radar_datas` | `ultrasonic_radar_modbus_tcp/ultrasonic_radar_datas` | 发布 | ≈3.3 Hz | 聚合消息，`radars[]` 为空表示本轮全部失败 |
 | `/perception_sensors/ultrasonic_radar_status/left_radar_502` | `std_msgs/Bool` | 发布 | 仅状态跳变 | latched；`true` 本轮读到数据，`false` 超时/离线/未上线 |
@@ -243,7 +245,7 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 
 | 设备 | 状态话题 | 判 `false` 的条件 | 恢复方式 |
 | --- | --- | --- | --- |
-| 激光雷达 | `/perception_sensors/processed_lidar_connection_status` | 20 s 内没有收到点云 | 重连由 `rslidar_sdk` 内置处理，本仓库不实现；雷达恢复发包后自动恢复。`lidar_preprocess` 在超时期间清空累加窗口，恢复后要重新攒满 `frame_quantity` 帧（默认约 1 s）才输出点云 |
+| 激光雷达 | `/perception_sensors/processed_lidar_connection_status` | 20 s 内没有收到点云 | 重连由 `rslidar_sdk` 内置处理，本仓库不实现；雷达恢复发包后自动恢复。`lidar_preprocess` 在超时期间清空累加窗口，恢复后要重新攒满 `frame_quantity` 帧（默认 1 帧，即下一帧）才输出点云 |
 | 超声波左（502） | `/perception_sensors/ultrasonic_radar_status/left_radar_502` | 本轮读寄存器失败：应答超时、连接被拒、网关忙或异常帧；启动探测失败也是 `false` | 已上线断线按 1 s 重连；启动就失败的端口由后台线程每 30 s 重探 |
 | 超声波右（503） | `/perception_sensors/ultrasonic_radar_status/right_radar_503` | 同上 | 同上 |
 | UWB | `/perception_sensors/uwb_status` | 主动采集：串口未打开、读写异常，或 15 s 内没有 CRC 有效的整帧；旁路订阅：15 s 内没收到来源话题的消息 | 主动采集：启动打不开每 5 s 重试，运行中失联每 10 s 重连；旁路订阅：来源恢复发布后自动恢复，节点不做重连 |
@@ -283,6 +285,10 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 - **激光雷达**：`POINT_TYPE=XYZI`，`x/y/z/intensity` 均为 float32，`point_step=16`；
   `dense_points=false`，点云可能含 NaN。工程没有 TF，rviz 的 Fixed Frame 要设为 `rslidar`。
   输出时间戳 = 雷达时间 + 首帧计算的一次性偏移。
+  输出点云默认已按 launch 现场值（`rotate_roll/pitch/yaw = 0/-90/180` 度）从雷达本体坐标系
+  转到车体坐标系，**但 `frame_id` 仍写 `rslidar`**，订阅方按实际参数理解。
+  录制的 `/rslidar_points` 是驱动原始点云，不受这套参数影响，回放时需同样带参数重新处理。
+  修正规则见 [lidar_preprocess/README.md](catkin_ws/src/lidar_preprocess/README.md#姿态修正)。
 - **超声波**：寄存器原始单位 mm，节点换算成 m；读数 ≤ 0.1 m（含 0）统一发布 `-1.0`，
   表示该路无目标，订阅方用 `< 0` 判断。**读到 0 不是通讯故障**。每组 4 路依次为
   `Front / Side1 / Side2 / Back`；502 为车体左侧，503 为车体右侧。
@@ -312,14 +318,15 @@ rosbag 子进程异常退出后节点不会自动感知（仍显示在录制）�
 
 | 链路 | 硬件发出/上报 | 节点采集节奏 | 话题发布 |
 | --- | --- | --- | --- |
-| 激光雷达 | Airy360 600 rpm，约 10 Hz | 回调每帧入队，后台线程维护累加长度 `frame_quantity` 的窗口；主循环 10 Hz 轮询 | ≈10 Hz；前 `frame_quantity` 帧（默认 10 帧 ≈1 s）不输出；每帧点数是窗口内各帧直接相加，默认约 10 倍带宽 |
+| 激光雷达 | Airy360 600 rpm，约 10 Hz | 回调每帧入队，后台线程维护累加长度 `frame_quantity` 的窗口；主循环 10 Hz 轮询 | ≈10 Hz；前 `frame_quantity` 帧不输出，默认 1 帧即首帧输出；每帧点数是窗口内各帧直接相加，默认 1 帧无放大 |
 | 超声波 | 设备只应答，不主动推送 | `poll_interval=0.3 s`，每轮遍历两个网关 | ≈3.3 Hz，每轮一条聚合消息 |
 | UWB（主动采集） | 标签驱动：动态默认约 10 Hz，上限 20 Hz；静态默认 0.1 Hz（可配置到 0.05 Hz） | 30 Hz 串口轮询，每轮取完缓冲 | 等于有效定位帧频率，不是固定 30 Hz |
 | UWB（旁路订阅） | 跟随来源话题（旧节点约 10 Hz） | 订阅回调，收一帧转发一帧 | 等于来源话题频率 |
 | 录制 | 事件驱动 | 服务 start/stop | 无周期 |
 | 上装电源使能 | 由底盘发布（频率未知） | 回调内按 `tops_power_enable` 去重，仅跳变时调服务；1 Hz 看门狗检测断流，5 s 无消息自动停录 | 无周期 |
 
-轮询周期不等于话题频率；激光雷达多帧累加还存在约 `frame_quantity` 倍的数据量放大。
+轮询周期不等于话题频率；激光雷达多帧累加还存在约 `frame_quantity` 倍的数据量放大
+（默认 `frame_quantity=1` 时不放大）。
 
 ## 启动与部署
 
@@ -346,7 +353,7 @@ source devel/setup.bash
 ```bash
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch
 roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
-    gateway_ip:=192.168.1.15 save_dir:=/data/rosbag max_bag_size_gb:=25 total_limit_action:=delete_old
+    gateway_ip:=192.168.1.12 save_dir:=/data/rosbag max_bag_size_gb:=25 total_limit_action:=delete_old
 ```
 
 顶层 launch 依次 include：`lidar_preprocess` → `ultrasonic_radar_modbus_tcp` → `uwb_rtu_serial_demo`
@@ -356,7 +363,7 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `gateway_ip` | `192.168.1.15` | 超声波 Modbus 网关地址 |
+| `gateway_ip` | `192.168.1.12` | 超声波 Modbus 网关地址 |
 | `save_dir` | 空 | 空表示仓库根目录的 `log/rosbag`，目录不存在时自动创建 |
 | `max_bag_size_gb` | `25.0` | 单次录制总大小上限（GB）；单卷固定 10 GB，源码硬编码 |
 | `total_limit_action` | `stop` | 达到总上限时：`stop` 停止录制；`delete_old` 删除最旧分卷后继续 |
@@ -399,14 +406,79 @@ X-GNOME-Autostart-enabled=true
 EOF
 ```
 
-#### 工作区在外挂盘
+#### 工作区在外挂盘（NVMe 的 sata 分区）
 
-两套工作区都放在外挂 SATA 盘 `/media/nvidia/sata` 上，桌面自启动可能早于 udisks 自动挂载。
-自启动项若直接指向盘上的脚本，开机时文件还不存在，窗口会立刻失败退出。因此用仓库根目录的
+两套工作区放在机器内置 NVMe 盘的一个数据分区上：分区卷标 `sata`，挂载点
+`/media/nvidia/sata`。**它不是外接 SATA 硬盘**，`sata` 只是分区卷标；同一块 NVMe 上
+还有另一个 `data` 分区挂在 `/data`，两者互不影响。桌面自启动可能早于挂载完成，自启动项
+若直接指向盘上的脚本，开机时文件还不存在，窗口会立刻失败退出。因此用仓库根目录的
 [wait_mount_run.sh](wait_mount_run.sh) 做引导：先等挂载点就绪，再 `exec` 盘上的入口脚本。
 
-**引导脚本必须拷到本地盘**（如 `~/scripts/`）。若它本身放在外挂盘，硬盘没挂载时脚本文件都
-不存在，等待逻辑根本没有机会执行。
+##### 1. 前提：盘必须开机自动挂载
+
+GNOME/udisks 对内置盘默认**不会**自动挂载，只在「文件」里点击磁盘图标时才挂。这种情况下
+开机自启动时盘还没挂，引导脚本会空转满 300 s 后报「未等到 … 本次未启动」，节点一个都
+不会起。确认当前状态：
+
+```bash
+mountpoint -q /media/nvidia/sata; echo "返回=$?"     # 0=已挂载，1=未挂载
+findmnt -rn -o TARGET,SOURCE,FSTYPE,LABEL | grep -Ei 'media|sata'
+sudo blkid                                            # UUID 与文件系统类型
+```
+
+返回 `1` 时用 `/etc/fstab` 固定挂载，不依赖桌面会话和文件管理器：
+
+```bash
+# 1. 备份并确认现有内容
+sudo cp /etc/fstab /etc/fstab.bak
+cat /etc/fstab
+
+# 2. 建挂载点并追加一行（ext4 示例；NTFS/exFAT 的挂载参数不同）
+sudo mkdir -p /media/nvidia/sata
+sudo tee -a /etc/fstab >/dev/null <<'EOF'
+
+# sata 分区：感知/跟随工作区所在盘
+UUID=7136cb27-6306-4ba2-9a27-23473f4a0de3  /media/nvidia/sata  ext4  defaults,nofail,x-systemd.device-timeout=10s  0  2
+EOF
+sudo systemctl daemon-reload
+
+# 3. 先验证再重启，fstab 写错会影响开机
+sudo mount -a && findmnt /media/nvidia/sata
+```
+
+- `UUID` 按目标机器 `blkid` 的输出替换；
+- `nofail`：盘不在时仍能正常开机，不会掉进 emergency mode；
+- `x-systemd.device-timeout=10s`：盘没插时最多等 10 s 就跳过。
+
+挂载正确的样子：
+
+```text
+TARGET             SOURCE          FSTYPE OPTIONS
+/media/nvidia/sata /dev/nvme0n1p16 ext4   rw,nosuid,nodev,relatime
+```
+
+- `SOURCE` 指向目标分区、`FSTYPE` 为 `ext4`、`TARGET` 正确即可；
+- `rw` 表示可写；
+- `nofail` / `x-systemd.device-timeout` 是 fstab/systemd 层选项，不会出现在 `OPTIONS` 里；
+- `nosuid,nodev` 是 systemd 的默认强化，对 ROS 工作区没有影响。
+
+再验证可写、工作区位置和 systemd 接管：
+
+```bash
+touch /media/nvidia/sata/.write_test && rm /media/nvidia/sata/.write_test && echo "可写 OK"
+ls -l /media/nvidia/sata/code/perception_sensors_ros_driver/run.sh
+df -h /media/nvidia/sata/code/perception_sensors_ros_driver   # 应显示 /dev/nvme0n1p16
+systemctl status media-nvidia-sata.mount --no-pager            # active (mounted)
+```
+
+最终**重启一次**，开机后执行 `mountpoint -q /media/nvidia/sata; echo "返回=$?"`，返回 `0`
+且不需要点文件管理器即算完成。写进 fstab 后 GNOME 不再把它当可移动盘，文件管理器里点不到，
+属正常现象。
+
+##### 2. 部署引导脚本与自启动项
+
+**引导脚本必须拷到本地盘**（如 `~/scripts/`）。若它本身放在目标分区，盘没挂载时脚本文件
+都不存在，等待逻辑根本没有机会执行。
 
 ```bash
 # 1. 引导脚本放本地盘；UWB 串口需要 dialout 组权限
@@ -417,6 +489,7 @@ sudo usermod -aG dialout nvidia
 
 # 2. 两个自启动项，各开一个终端窗口
 mkdir -p ~/.config/autostart
+
 cat > ~/.config/autostart/perception-sensors.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -425,6 +498,7 @@ Comment=开机启动感知传感器 ROS 节点
 Exec=gnome-terminal --title="感知传感器" -- /home/nvidia/scripts/wait_mount_run.sh run.sh
 X-GNOME-Autostart-enabled=true
 EOF
+
 cat > ~/.config/autostart/perception-follow.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -435,7 +509,7 @@ X-GNOME-Autostart-enabled=true
 EOF
 ```
 
-等待与启动行为：
+##### 3. 等待与启动行为
 
 | 情况 | 结果 |
 | --- | --- |
@@ -450,7 +524,7 @@ EOF
   `/media/nvidia/sata/follow`。该目录不在时，跟随窗口会在 `cd` 处失败退出。
 - 两个窗口相互独立：感知传感器按 `Ctrl+C` 不影响跟随控制，反之亦然。
 
-效果与操作：
+#### 效果与操作
 
 | 操作 | 结果 |
 | --- | --- |
@@ -464,7 +538,7 @@ EOF
 
 ![开机后自动弹出的「感知传感器」终端，节点日志与运行状态直接可见](images/开机自启动.png)
 
-注意：
+#### 注意
 
 - **停止时先按 `Ctrl+C`，等窗口里各节点退出后再关窗口**。直接叉窗口不走 SIGINT 清理路径，
   录制中的 rosbag 分卷可能不完整。

@@ -21,7 +21,11 @@ find_package(catkin REQUIRED COMPONENTS
 # 查找线程库
 find_package(Threads REQUIRED)
 # pcl
-find_package(PCL REQUIRED COMPONENTS common io filters)
+# 组件说明：common（质心/变换）、io（loadPCDFile）、filters（ApproximateVoxelGrid/ExtractIndices）、
+#   segmentation（SACSegmentation）、search + kdtree（KdTree 头文件与实现），供 pointcloud_processor 使用
+find_package(PCL REQUIRED COMPONENTS common io filters segmentation search kdtree)
+# OpenCV：pointcloud_processor 的 BEV 占用图（cv::Mat）
+find_package(OpenCV REQUIRED)
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -144,7 +148,7 @@ include_directories(
   include
   ${catkin_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
-#   ${OpenCV_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 ## Declare a C++ library
@@ -164,6 +168,7 @@ include_directories(
 # ros节点
 add_executable(lidar_preprocess_node  lidar_preprocess.cpp
                                 src/lidar_sub.cpp
+                                src/pointcloud_processor.cpp
                                 )
 
 ## Rename C++ executable without prefix
@@ -202,6 +207,10 @@ foreach(TARGET ${EXEC_DEMOS})
     # 链接 pcl 库
     target_link_libraries(${TARGET} PRIVATE ${PCL_LIBRARIES})
     target_include_directories(${TARGET} PRIVATE  ${PCL_INCLUDE_DIRS})
+
+    # 链接 OpenCV 库（pointcloud_processor 的 BEV 图像）
+    target_link_libraries(${TARGET} PRIVATE ${OpenCV_LIBRARIES})
+    target_include_directories(${TARGET} PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 endforeach()
 

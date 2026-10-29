@@ -5,8 +5,27 @@
     <arg name="lidar_topic" default="/rslidar_points" doc="输入点云话题"/>
     
     <!-- 预处理节点核心参数 -->
-    <arg name="frame_quantity" default="10" doc="点云滑动窗口累加帧数"/>
+    <arg name="frame_quantity" default="1" doc="点云滑动窗口累加帧数（整数）"/>
     <arg name="timeout_sec" default="5.0" doc="雷达心跳超时时间(秒)"/>
+
+    <!-- ================= 点云处理参数（改这里不需要重新编译） ================= -->
+    <arg name="leaf_size" default="0.02" doc="体素降采样叶大小(m)，越大越省带宽、细节越少"/>
+
+    <!-- 安装姿态修正（度，按 Z-Y-X 顺序旋转点云本身）：修正雷达出厂坐标系与装车姿态的差异。
+         当前车型为「雷达翻转立起、+Z（旋转轴）朝车头」，现场实测值 pitch=-90、yaw=180。
+         三值全为 0 表示不旋转；安装有偏差时直接填实测角度（如 88.5）。 -->
+    <arg name="rotate_roll"  default="0.0"   doc="点云绕车体前后轴(X，指向车头)的旋转角(度)"/>
+    <arg name="rotate_pitch" default="-90.0" doc="点云绕车体左右轴(Y，指向车体左侧)的旋转角(度)"/>
+    <arg name="rotate_yaw"   default="180.0" doc="点云绕车体垂直轴(Z，指向上方)的旋转角(度)"/>
+
+    <!-- 空间范围滤波：总开关 + 前后/左右/上下三组范围（车体坐标系，姿态修正之后应用） -->
+    <arg name="range_filter_enable" default="true" doc="空间范围滤波总开关"/>
+    <arg name="range_x_min" default="-2.0"  doc="前后范围下限(m)，+X 为前方"/>
+    <arg name="range_x_max" default="20.0"  doc="前后范围上限(m)"/>
+    <arg name="range_y_min" default="-10.0" doc="左右范围下限(m)，+Y 为左侧"/>
+    <arg name="range_y_max" default="10.0"  doc="左右范围上限(m)"/>
+    <arg name="range_z_min" default="-5.0"  doc="高度范围下限(m)，+Z 向上"/>
+    <arg name="range_z_max" default="5.0"   doc="高度范围上限(m)"/>
 
     <!-- ================= 1. 启动速腾 Airy360 底层驱动 ================= -->
     <!-- rslidar_sdk 的 start.launch 只启动驱动节点，不再自动拉起 rviz -->
@@ -18,8 +37,21 @@
         
         <!-- 将 launch 参数注入到 ROS 参数服务器，供节点内部读取 -->
         <param name="input_topic" value="$(arg lidar_topic)"/>
-        <param name="frame_quantity" value="$(arg frame_quantity)"/>
-        
+        <param name="frame_quantity" value="$(arg frame_quantity)" type="int"/>
+
+        <!-- 点云处理参数：节点用私有句柄 (~) 读取 -->
+        <param name="leaf_size" value="$(arg leaf_size)" type="double"/>
+        <param name="rotate_roll" value="$(arg rotate_roll)" type="double"/>
+        <param name="rotate_pitch" value="$(arg rotate_pitch)" type="double"/>
+        <param name="rotate_yaw" value="$(arg rotate_yaw)" type="double"/>
+        <param name="range_filter_enable" value="$(arg range_filter_enable)" type="bool"/>
+        <param name="range_x_min" value="$(arg range_x_min)" type="double"/>
+        <param name="range_x_max" value="$(arg range_x_max)" type="double"/>
+        <param name="range_y_min" value="$(arg range_y_min)" type="double"/>
+        <param name="range_y_max" value="$(arg range_y_max)" type="double"/>
+        <param name="range_z_min" value="$(arg range_z_min)" type="double"/>
+        <param name="range_z_max" value="$(arg range_z_max)" type="double"/>
+
     </node>
 
 </launch>

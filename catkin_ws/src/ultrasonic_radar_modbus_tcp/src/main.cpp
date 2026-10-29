@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
     // —— 一、串口服务器 ——
     // 固定两个 Modbus 网关端口，均在同一台 M04 上；读不到的端口启动时跳过。
     // 端口与 HC 通道对应关系：502→HC0，503→HC1，504→HC2，505→HC3。
-    std::string gateway_ip = "192.168.1.15";  // M04 串口服务器 IP
+    std::string gateway_ip = "192.168.1.12";  // M04 串口服务器 IP（现场值，launch 可覆盖）
     int port_1 = 503;                          // 网关端口，对应 HC1
     int port_2 = 502;                          // 网关端口，对应 HC0
     const int slave_id = 1;  // RS485 侧 DYP 电应普超声波雷达模组从机地址，固定值（0 为广播地址）

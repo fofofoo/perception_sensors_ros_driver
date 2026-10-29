@@ -24,13 +24,15 @@
 - 类型：`sensor_msgs/PointCloud2`，由 PCL `PointXYZI` 通过 `pcl::toROSMsg` 转换；
 - 字段：`x` / `y` / `z` / `intensity`，全部 float32，`point_step = 16`；
 - `frame_id`：`rslidar`（与驱动一致）；
-- 内容是最近 `frame_quantity` 帧原始点的**直接拼接**，未做去重、降采样、运动补偿；
+- 内容默认是最近 `frame_quantity` 帧原始点的**直接拼接**，未做去重、运动补偿；随后按参数依次做
+  体素降采样（`leaf_size`）、姿态修正（`rotate_roll/pitch/yaw`）、空间范围滤波（`range_filter_enable`）；
+- **启用姿态修正后，坐标已不在雷达本体坐标系**，但 `frame_id` 仍写 `rslidar`（无 TF，仅作标签）；
 - 时间戳：见下文“时间戳对齐”。
 
 ## 默认行为
 
 - 启动后订阅输入话题，把每帧转成 `pcl::PointCloud<PointXYZI>` 放入原始队列；
-- 后台线程维护长度为 `frame_quantity`（默认 10）的滑动窗口：
+- 后台线程维护长度为 `frame_quantity`（默认 1，即不累加）的滑动窗口：
   - 窗口未满时不发布任何结果；
   - 窗口满后，每来一帧就丢掉最旧一帧、加入最新一帧，输出整窗累加结果；
   - 因此输出频率约等于输入频率（10 Hz），但每帧点数约为单帧的 10 倍；
@@ -53,13 +55,45 @@
 | launch 参数 | 节点参数 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `lidar_topic` | `~input_topic` | `/rslidar_points` | 输入点云话题 |
-| `frame_quantity` | `~frame_quantity` | `10` | 滑动窗口帧数 |
+| `frame_quantity` | `~frame_quantity` | `1` | 滑动窗口帧数（整数）；`1` 表示不累加、逐帧输出 |
 | `timeout_sec` | — | `5.0` | **未生效**：节点内写死 20 s |
+| `leaf_size` | `~leaf_size` | `0.02` | 体素降采样叶大小（m），越大越省带宽 |
+| `rotate_roll` | `~rotate_roll` | `0.0` | 点云绕车体前后轴（X）旋转角（度） |
+| `rotate_pitch` | `~rotate_pitch` | `-90.0` | 点云绕车体左右轴（Y）旋转角（度），当前车型现场值 |
+| `rotate_yaw` | `~rotate_yaw` | `180.0` | 点云绕车体垂直轴（Z）旋转角（度），当前车型现场值 |
+| `range_filter_enable` | `~range_filter_enable` | `true` | 空间范围滤波总开关 |
+| `range_x_min` / `range_x_max` | `~range_x_min` 等 | `-2.0` / `20.0` | 前后范围（m） |
+| `range_y_min` / `range_y_max` | `~range_y_min` 等 | `-10.0` / `10.0` | 左右范围（m） |
+| `range_z_min` / `range_z_max` | `~range_z_min` 等 | `-5.0` / `5.0` | 高度范围（m） |
+
+### 姿态修正
+
+三个 `rotate_*` 角度按 **Z-Y-X** 顺序组合（`R = Rz(yaw)·Ry(pitch)·Rx(roll)`），单位度，
+全为 `0.0` 时不旋转，作用对象是点云本身，角度定义在**车体坐标系**（+X 前 / +Y 左 / +Z 上）：
+
+- `roll`：点云绕车体前后轴翻滚；
+- `pitch`：点云绕车体左右轴俯仰；
+- `yaw`：点云绕车体垂直轴旋转。
+
+用于修正雷达出厂坐标系与装车姿态不一致，典型场景是**雷达出厂 +Z 朝上、装车后 +Z 朝前**。
+当前车型为「雷达翻转立起、旋转轴朝车头」，现场实测默认值：
+
+| launch 参数 | 值 | 作用 |
+| --- | --- | --- |
+| `rotate_roll` | `0.0` | 不翻滚 |
+| `rotate_pitch` | `-90.0` | 把雷达 +Z 从车尾方向抬到车头方向 |
+| `rotate_yaw` | `180.0` | 水平转半圈，把前后与左右同时摆正 |
+
+实际安装总有几度误差，可直接填实测值（如 `88.5`）。只做旋转、不做平移，安装位置偏移需另行处理。
+判断姿态是否摆正：地面应成为水平的 `z ≈ const` 平面，车头方向为 `+X`、车体左侧为 `+Y`；
+用「车头正前方偏左放一个参照物，看它落在点云的哪个象限」最快（`x>0, y>0` 即正确）。
 
 启动时覆盖：
 
 ```bash
 roslaunch lidar_preprocess lidar_preprocess.launch lidar_topic:=/rslidar_points frame_quantity:=5
+# 另一车型：雷达顶面朝车头（本体 +X 朝下），只俯仰
+roslaunch lidar_preprocess lidar_preprocess.launch rotate_pitch:=90 rotate_yaw:=0
 ```
 
 代码内写死、不支持 launch 修改的项（[lidar_preprocess.cpp](lidar_preprocess.cpp)）：
@@ -83,8 +117,9 @@ output.stamp = result.timestamp + time_offset
 ## 编译与运行
 
 ```bash
-cd /home/liyun/code/devices/airy360_ws/catkin_ws
-catkin_make -j8
+cd /home/liyun/code/perception_sensors_ros_driver/catkin_ws
+# 只编译本节点（及其依赖），不会像 --only-pkg-with-deps 那样固化 CATKIN_WHITELIST_PACKAGES
+catkin_make lidar_preprocess_node -j8
 source devel/setup.bash
 roslaunch lidar_preprocess lidar_preprocess.launch
 ```
@@ -108,7 +143,8 @@ rosrun rviz rviz -d $(rospack find lidar_preprocess)/rviz/lidar_preprocess.rviz
 ```
 
 - 话题内容本身就是 `frame_quantity` 帧的累加结果，**不需要**再靠 rviz 的 `Decay Time` 叠加残影；
-- 点数约为单帧的 10 倍，渲染较吃 CPU/GPU，卡顿时可减小 `frame_quantity` 或点大小；
+- 默认 `frame_quantity=1`，输出点数与单帧相同；调大后点数约为单帧的 `frame_quantity` 倍，
+  渲染更吃 CPU/GPU，卡顿时可减小 `frame_quantity` 或点大小；
 - 工程没有 TF，`Fixed Frame` 必须与消息 `frame_id` 一致（`rslidar`），否则点云不显示。
 
 ## 实现说明
@@ -118,7 +154,9 @@ rosrun rviz rviz -d $(rospack find lidar_preprocess)/rviz/lidar_preprocess.rviz
 | [lidar_preprocess.cpp](lidar_preprocess.cpp) | `main`：参数、订阅话题、发布器、10 Hz 主循环 |
 | [include/lidar_sub.h](include/lidar_sub.h) | `zl_lidar::LidarSub` 类声明，职责与接口注释 |
 | [src/lidar_sub.cpp](src/lidar_sub.cpp) | 订阅回调、后台累加线程、心跳定时器 |
-| [launch/lidar_preprocess.launch](launch/lidar_preprocess.launch) | 启动驱动与节点，暴露 `lidar_topic`、`frame_quantity` |
+| [include/pointcloud_processor.h](include/pointcloud_processor.h) | `PointCloudProcessor` 类声明：旋转、滤波、BEV 投影 |
+| [src/pointcloud_processor.cpp](src/pointcloud_processor.cpp) | 姿态修正 `RotateRPY`、体素降采样、范围滤波、BEV 投影 |
+| [launch/lidar_preprocess.launch](launch/lidar_preprocess.launch) | 启动驱动与节点，暴露 `lidar_topic`、`frame_quantity` 及全部点云处理参数 |
 | [rviz/lidar_preprocess.rviz](rviz/lidar_preprocess.rviz) | 可视化配置，订阅 `/perception_sensors/processed_lidar_cloud` |
 | [CMakeLists.txt](CMakeLists.txt) | 可执行目标 `lidar_preprocess_node` |
 

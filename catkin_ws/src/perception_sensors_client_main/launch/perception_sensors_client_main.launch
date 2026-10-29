@@ -9,7 +9,7 @@
     -->
 
     <!-- 超声波网关地址（现场网络可能不同） -->
-    <arg name="gateway_ip" default="192.168.1.15" doc="超声波 Modbus 网关 IP"/>
+    <arg name="gateway_ip" default="192.168.1.12" doc="超声波 Modbus 网关 IP"/>
 
     <!-- bag_recorder 参数，含义见 bag_recorder.launch -->
     <arg name="save_dir" default="" doc="bag 保存目录；留空表示仓库根目录的 log/rosbag"/>
