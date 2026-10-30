@@ -8,6 +8,7 @@
  *      值为 1 时调用 /perception_sensors/start_bag_recorder，
  *      为 0 或其它异常值时调用 /perception_sensors/stop_bag_recorder；
  *   3. 对目标状态去重，避免底盘周期发布时反复调用服务；
+ *      停止方向例外：stop 服务失败也记录「已停止」意图，保证拨杆关再开能重新开录；
  *   4. 断流保护：超过 kChassisMsgTimeoutSec（5 s）未收到 /chassis_msg 时，
  *      若仍在录制则自动调用 stop 服务，防止底盘失联后持续录无效数据。
  *
@@ -28,6 +29,11 @@ namespace
 // 初值 -1 表示尚未同步：第一帧消息无论真假都会执行一次服务调用，
 // 这样本节点中途重启时也能把 bag_recorder 拉回与底盘一致的状态。
 int g_last_applied_state = -1;
+
+// 停止意图已记录、但 stop 服务调用失败（bag_recorder 正阻塞落盘或正在重启）。
+// 置位后继续在后续 0 帧上重试 stop，避免「意图已停、实际仍在录」长期遗留。
+// 成功调用 stop，或切到 1 方向重新 start 时清除。
+bool g_stop_retry_pending = false;
 
 // 最近一次收到 /chassis_msg 的本地时间，断流看门狗据此判断底盘是否仍在发送。
 // 用本地时钟而非 msg->header.stamp：底盘与主机时钟可能不同步，
@@ -91,7 +97,8 @@ CallResult callTrigger(ros::ServiceClient& client, const char* action, bool want
 }
 
 // 底盘控制消息回调：上装电源使能 tops_power_enable == 1 开始保存，其余值停止保存。
-// 只在目标状态发生变化时动作；服务失败则保持旧状态，等下一帧重试。
+// 只在目标状态发生变化时动作；start 失败保持旧状态等下一帧重试。
+// stop 方向例外：服务失败也记录「已停止」，否则拨杆关再开会被去重吞掉、无法重开。
 void chassisMsgCallback(const common_msgs::ChassisMsg::ConstPtr& msg, ros::ServiceClient* start_client, ros::ServiceClient* stop_client)
 {
     g_last_msg_time = ros::Time::now();  // 刷新断流看门狗的计时基准
@@ -101,7 +108,14 @@ void chassisMsgCallback(const common_msgs::ChassisMsg::ConstPtr& msg, ros::Servi
     const int want = want_recording ? 1 : 0;
     if (want == g_last_applied_state)
     {
-        return;  // 周期重复消息，忽略
+        // 周期重复消息忽略；但上一次 stop 失败时，借后续 0 帧继续补调，
+        // 直到 bag_recorder 确认已停止（返回 Not recording! 也算）。
+        if (!want_recording && g_stop_retry_pending &&
+            callTrigger(*stop_client, "停止录制（重试）", false) != CallResult::kFailed)
+        {
+            g_stop_retry_pending = false;
+        }
+        return;
     }
 
     const CallResult result = want_recording
@@ -111,6 +125,20 @@ void chassisMsgCallback(const common_msgs::ChassisMsg::ConstPtr& msg, ros::Servi
     if (result != CallResult::kFailed)
     {
         g_last_applied_state = want;
+        g_stop_retry_pending = false;
+        return;
+    }
+
+    // —— 停止方向例外：服务失败也把本地意图记为 0 ——
+    // 超限自动停录时 bag_recorder 正阻塞在 waitpid 落盘，stop 可能超时/失败；
+    // 若此仍在本地保留 1，用户拨杆关再开（1→0→1）时 want == 1 == 状态会被直接
+    // 去重吞掉，录制再也打不开（现场表现为「按钮无响应」）。
+    // 记 0 后拨回的 1 一定能触发 start；实际停止由 g_stop_retry_pending 在
+    // 后续 0 帧上补齐，若用户已拨回 1，start 返回 Already recording! 同样安全。
+    if (!want_recording)
+    {
+        g_last_applied_state = 0;
+        g_stop_retry_pending = true;
     }
 }
 
@@ -139,6 +167,7 @@ void checkChassisTimeout(ros::ServiceClient* stop_client)
     if (callTrigger(*stop_client, "断流停止录制", false) != CallResult::kFailed)
     {
         g_last_applied_state = 0;
+        g_stop_retry_pending = false;
     }
 }
 

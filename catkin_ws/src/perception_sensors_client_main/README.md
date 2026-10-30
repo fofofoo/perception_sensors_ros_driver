@@ -9,7 +9,8 @@
 3. 读取 `chassis_relay_ctrl.tops_power_enable`（上装电源使能）作为录制开关：
    值为 `1` 时调用 `/perception_sensors/start_bag_recorder`，为 `0` 或其它异常值时调用
    `/perception_sensors/stop_bag_recorder`；
-4. 对目标状态去重，底盘周期重复发布时不会反复调用服务；服务失败会在下一帧自动重试。
+4. 对目标状态去重，底盘周期重复发布时不会反复调用服务；start 失败会在下一帧自动重试；
+   stop 失败也会记为「已停止」，并在后续 0 帧补调，保证拨杆关再开一定能重新开录。
 
 本节点不发布任何话题，也没有主循环；以订阅回调驱动为主，另有一个 1 Hz 看门狗定时器
 负责 `/chassis_msg` 断流检测（超过 5 s 无消息自动停录）。
@@ -60,6 +61,10 @@ roslaunch perception_sensors_client_main perception_sensors_client_main.launch \
 - **断流保护**：1 Hz 看门狗检测 `/chassis_msg`，若正在录制且超过 5 s 没收到消息，
   自动调用 stop 服务停录。停录失败会在下一秒重试；底盘恢复发布且 `tops_power_enable` 仍为 1 时，
   会重新开始录制。节点启动后从未收到消息时不触发。
+- **`bag_recorder` 自行停录（超限）后的行为**：单次录制达到 `max_bag_size_gb` 时由
+  `bag_recorder` 内部停止，本节点收不到通知。上装电源保持 `1` 时不会自动重开，必须把拨杆
+  关掉再打开；拨杆关闭那一次即使 stop 服务调用失败（`bag_recorder` 正阻塞落盘或重启），
+  也会把本地状态记为「已停止」，拨回 `1` 时一定重新发出 start，停止本身在后续 0 帧上补调。
 - 服务未注册时只打印 2 秒节流的告警，不阻塞节点；后续消息会继续重试。
 - `bag_recorder` 返回 `Already recording!` / `Not recording!` 时视为目标状态已达成，
   不重复调用；其它失败原因（如保存目录不可用）会原样打印并等下一帧重试。

@@ -103,13 +103,17 @@ rosbag record --lz4 --split --size 10240 -O <save_dir>/perception_sensors_<序�
 150 GB 时生效。要让录制连续跑、完全靠目录循环覆盖，可把 `total_limit_action`
 设为 `delete_old` 或调大 `max_bag_size_gb`。
 
+超限自停发生在节点内部，会发布 `recording_status=false`，但联动节点不订阅该话题：
+上装电源保持 `1` 时不会自动重开，需要拨杆关再开。自停期间 `stopRecording()` 的
+`waitpid` 会阻塞单线程回调，落盘完成前 start/stop 服务都无法响应。
+
 ### 频率链
 
 录制是事件驱动，没有硬件上报或固定采集周期：
 
 | 环节 | 频率 | 决定因素 |
 | --- | --- | --- |
-| 触发 start/stop | 事件驱动 | 服务调用方；联动节点按 `/chassis_msg` 的 `tops_power_enable` 跳变去重后调用 |
+| 触发 start/stop | 事件驱动 | 服务调用方；联动节点按 `/chassis_msg` 的 `tops_power_enable` 跳变去重后调用，stop 调用失败时在后续 0 帧补调 |
 | rosbag 写入 | 连续写入 | 上游话题频率与磁盘带宽；单卷写满 10 GB 时切分卷 |
 | `recording_size` / `recording_dir_size` | 1 Hz | main 中的 `ros::Duration(1.0)` 定时器；停止后不再更新 |
 | `recording_status` | 仅跳变 | start / stop / 节点析构 |
